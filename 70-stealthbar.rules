@@ -1,0 +1,3 @@
+# Lets the logged-in user open the hidraw node of Turtle Beach devices (vendor 10f5) without root.
+# Install: copy to /etc/udev/rules.d/, then `sudo udevadm control --reload && sudo udevadm trigger`.
+KERNEL=="hidraw*", ATTRS{idVendor}=="10f5", TAG+="uaccess"

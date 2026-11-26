@@ -1,0 +1,15 @@
+[package]
+name = "stealthbar"
+version = "0.1.0"
+edition = "2024"
+description = "Battery and mic status of a Turtle Beach Stealth Pro II headset, as JSON lines for a status bar"
+license = "MIT"
+repository = "https://github.com/Ronll/stealthbar"
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+
+[profile.release]
+lto = true
+strip = true

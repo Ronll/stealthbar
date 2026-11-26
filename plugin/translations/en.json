@@ -1,0 +1,12 @@
+{
+  "settings": {
+    "command": {
+      "label": "Command",
+      "description": "How to start the daemon; use a full path if stealthbar is not on PATH."
+    },
+    "low_battery": {
+      "label": "Low battery (%)",
+      "description": "At or below this the widget turns red."
+    }
+  }
+}
