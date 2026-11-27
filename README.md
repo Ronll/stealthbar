@@ -209,7 +209,7 @@ stealthbar set anc toggle`.)
 `"exec": "stealthbar watch | jq --unbuffered -c '{text: (if .on then \"🎧 \\(.battery)%\" else \"\" end)}'"`
 with `"return-type": "json"`.
 
-## Config file: game/chat wheel → app volumes
+## Config file: game/chat wheel → app volumes, default audio device
 
 Optional. Read once at start from `$STEALTHBAR_CONFIG`, else `$XDG_CONFIG_HOME/stealthbar/config.toml`
 (default `~/.config/stealthbar/config.toml`; `stealthbar config-path` prints it). Missing file = defaults (off).
@@ -225,7 +225,18 @@ mode = "volume"           # default; or "crossfade"
 apps = ["discord", "vesktop", "webcord", "WEBRTC VoiceEngine"]
 duck_game = false         # crossfade only: also lower every other stream while the wheel leans toward chat
 set_wheel = true          # make the lower left wheel the game/chat wheel (PC platform) on every connect
+
+[audio]
+make_default = false      # true: when the headset turns on, make it the default output and input
 ```
+
+**`[audio] make_default`**: the dock's sound card exists whenever the dock is plugged in, headset on or not, so the
+desktop can't tell when to switch to it. With this on, each time the headset turns on (and when the daemon starts
+with it on) the daemon runs `wpctl set-default` for the dock's sink and source: the PipeWire nodes of the device
+with `device.vendor.id` `0x10f5` and the dock's product id. Nothing is switched back when the headset turns off;
+WirePlumber keeps the dock as the default. Needs `pw-dump` and `wpctl` (PipeWire + WirePlumber).
+
+The game/chat wheel:
 
 How it behaves:
 
@@ -418,6 +429,7 @@ per-process session byte), so replies to someone else's requests stand out.
 | `src/decode.rs` | raw keys → `battery`, `mic_muted`, `details`; the place to add a decoded field |
 | `src/config.rs` | config file location and schema |
 | `src/mix.rs` | game/chat mix curve and PipeWire stream volumes (`pw-dump`, `wpctl`) |
+| `src/audio.rs` | `[audio] make_default`: the dock's sink and source become the defaults when the headset turns on |
 | `plugin/plugin.toml` | Noctalia manifest: id `ronll/stealthbar`, service, widget, panel, settings |
 | `plugin/service.luau` | runs `stealthbar watch` once, publishes each line as state `stealthbar.status`; runs `stealthbar set` for the panel |
 | `plugin/widget.luau` | bar capsule from `stealthbar.status`; click toggles the panel |

@@ -1,6 +1,7 @@
 //! stealthbar: prints the state of a Turtle Beach Stealth Pro II headset as one JSON line per change.
 //! See README.md for the protocol, the output format, the config file and how the Noctalia plugin uses it.
 
+mod audio;
 mod config;
 mod control;
 mod decode;
@@ -371,6 +372,7 @@ fn run(
     let mut busy_until = Instant::now();
     // per connection: the chat-mix writes (enable wheel reports, wheel job) are sent once all records are in
     let mut mix_setup_done = false;
+    let mut was_on = false;
     let mut pending: HashMap<String, (String, Instant)> = HashMap::new();
     let mut wheel = mix::Wheel::new(cfg.chat_mix.mode == config::Mode::Crossfade);
     let mut mix_moved = false;
@@ -547,6 +549,10 @@ fn run(
                 next_ask.get_or_insert(Instant::now() + retry);
             }
         }
+        if state.on && !was_on && !once && cfg.audio.make_default {
+            audio::make_default(product);
+        }
+        was_on = state.on;
         if !state.on {
             mix_setup_done = false;
             seen.clear();
