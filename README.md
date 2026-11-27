@@ -382,7 +382,8 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
 
 - **Volume:** there is no HID volume command. The headset's master volume is the dock's standard USB Audio Class
   volume (ALSA `PCM Playback Volume`, 0–74 = −74…0 dB); key `0x2A0` only mirrors it. PipeWire/PulseAudio drive it
-  out of the box. The upper wheel just sends Volume Up/Down keys to the PC.
+  out of the box. The volume wheel changes that hardware volume itself and PipeWire follows; it sends no media
+  keys (none were seen on the dock's consumer-control report, whose Play/Pause/Next/Prev codes also go unused).
 - **Stuck dock:** after a laptop suspend/resume (or other USB re-enumeration, e.g. through a hub) the dock can come
   back in a state where it **ignores system volume and answers no HID requests** (every GET_REPORT is empty).
   `stealthbar` then reports `present: true, on: false` forever. A physical unplug/replug fixes it; a plain
