@@ -10,6 +10,25 @@ use serde::Deserialize;
 pub struct Config {
     pub chat_mix: ChatMix,
     pub audio: Audio,
+    pub buttons: Buttons,
+}
+
+/// What a headset button does when the headset hands it to the app. With the chat mix on, stealthbar sets
+/// 0x500 = 1 (the headset then reports the wheel), and the headset then treats stealthbar as Turtle Beach's app:
+/// a short press of the power button no longer toggles Superhuman Hearing by itself but only flips 0x520.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Buttons {
+    /// "superhuman-hearing" (what the button does without an app), "none", or a shell command.
+    pub power: String,
+}
+
+impl Default for Buttons {
+    fn default() -> Self {
+        Self {
+            power: "superhuman-hearing".into(),
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -97,6 +116,10 @@ mod tests {
         assert!(c.chat_mix.apps.iter().any(|a| a == "discord"));
         assert!(!Config::default().chat_mix.enabled);
         assert!(!Config::default().audio.follow_headset);
+        assert_eq!(Config::default().buttons.power, "superhuman-hearing");
+        let c: Config =
+            toml::from_str("[buttons]\npower = \"noctalia msg media toggle\"\n").unwrap();
+        assert_eq!(c.buttons.power, "noctalia msg media toggle");
         let c: Config = toml::from_str("[audio]\nfollow_headset = true\n").unwrap();
         assert!(c.audio.follow_headset);
         assert!(toml::from_str::<Config>("[chat_mix]\nbogus = 1\n").is_err());

@@ -146,7 +146,7 @@ What the UI shows:
     mode buttons, level); loudness boost.
   - **Mic:** mic in use, monitoring, AI noise reduction, built-in mute, sensitivity; noise gate on/off and level;
     mic EQ (preset buttons, 10 bands).
-  - **Device:** mode button and lower wheel jobs (PC); auto off, wake on motion, voice prompt volume, dock status
+  - **Device:** power button action (from the config file), mode button and lower wheel jobs (PC); auto off, wake on motion, voice prompt volume, dock status
     and battery-slot lights; the PlayStation/Xbox jobs; about (name, ids, firmware, protocol); raw values (every
     key the headset reported, sorted).
 
@@ -236,7 +236,24 @@ set_wheel = true          # make the lower left wheel the game/chat wheel (PC pl
 
 [audio]
 follow_headset = false    # true: the dock's sound card disappears while the headset is off, like Bluetooth
+
+[buttons]
+power = "superhuman-hearing"  # short press of the power button: "superhuman-hearing", "none", or a shell command
 ```
+
+**`[buttons] power`**: with the chat mix on, stealthbar sets `0x500 = 1` so the headset reports the wheel, and the
+headset then behaves as if Turtle Beach's app were connected: a short (about 1 s) press of the power button no
+longer toggles Superhuman Hearing by itself, it only flips key `0x520` and leaves the action to the app. stealthbar
+is that app, so it carries out this setting on every flip:
+
+- `"superhuman-hearing"` (default): toggles Superhuman Hearing (`0x720`), the button's normal job.
+- `"none"`: nothing.
+- anything else: run as a shell command (`sh -c`), e.g. `"playerctl play-pause"` or, on Noctalia,
+  `"noctalia msg media toggle"` for play/pause.
+
+Without the chat mix (`0x500` stays 0) the headset handles the button itself and this setting does nothing. No
+other button is handed over: the Mode button still does its job (`stealthbar set button …`) on the headset, and
+the Bluetooth button, long presses and the volume wheel are never reported (all measured on a `2283` dock).
 
 **`[audio] follow_headset`**: the dock's sound card exists whenever the dock is plugged in, headset on or not, so
 PipeWire keeps it as the default output even while the headset is off, and sound goes nowhere. A Bluetooth headset

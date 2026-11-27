@@ -288,12 +288,22 @@ local function rawRows(raw)
   return out
 end
 
+-- The power button's short press, set by `[buttons] power` in stealthbar's config file.
+local function powerButton(action)
+  if action == nil then return "—" end
+  if action == "superhuman-hearing" then return "Superhuman Hearing" end
+  if action == "none" then return "Nothing" end
+  if action:find("media toggle") or action:find("play%-pause") then return "Play / pause" end
+  return action
+end
+
 local function device(s, d)
   local headset, tx, power = d.headset or {}, d.transmitter or {}, d.power or {}
   local controls = d.controls or {}
   local wheel, button = controls.wheel or {}, controls.button or {}
   return {
     section("Controls", {
+      row("Power button (short press)", powerButton(d.power_button)),
       select("Mode button", BUTTON, button.pc, "button"),
       select("Lower wheel", WHEEL, wheel.pc, "wheel"),
     }, "hand-click"),

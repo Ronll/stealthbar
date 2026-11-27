@@ -91,6 +91,9 @@ struct State {
     mix: Option<u8>,
     /// Loudness boost: the stored playback level before the EQ (RACE 0x000A), in dB.
     loudness: Option<f32>,
+    /// What a short press of the power button does: the configured action while the chat mix hands the button to
+    /// us, else "superhuman-hearing" (the headset's own).
+    power_button: String,
 }
 
 impl State {
@@ -107,6 +110,7 @@ impl State {
                 let mut d = decode::details(k);
                 d["chat_mix"] = json!(self.mix);
                 d["loudness_db"] = json!(self.loudness);
+                d["power_button"] = json!(self.power_button);
                 d["raw"] = json!(k);
                 d
             } else {
@@ -184,6 +188,30 @@ fn watch() {
                 control::Cmd::Raw => Ok("{}".into()),
                 control::Cmd::Set(..) => Err("no Stealth Pro II dock found".into()),
             });
+        }
+    }
+}
+
+/// Carry out the power button's action. Returns the new Superhuman Hearing value to write for
+/// "superhuman-hearing"; a command runs in the background (`sh -c`), its exit is collected by a thread.
+fn power_button(action: &str, keys: &decode::Keys) -> Option<String> {
+    match action {
+        "none" | "" => None,
+        "superhuman-hearing" => {
+            let on = keys.get("720").and_then(Value::as_str).map(str::trim) == Some("1");
+            Some(if on { "0" } else { "1" }.into())
+        }
+        command => {
+            match std::process::Command::new("sh")
+                .args(["-c", command])
+                .spawn()
+            {
+                Ok(mut child) => {
+                    std::thread::spawn(move || child.wait());
+                }
+                Err(e) => eprintln!("stealthbar: power button command: {e}"),
+            }
+            None
         }
     }
 }
@@ -371,6 +399,11 @@ fn run(
     let mut state = State {
         present: true,
         device: Some(product.into()),
+        power_button: if cfg.chat_mix.enabled {
+            cfg.buttons.power.clone()
+        } else {
+            "superhuman-hearing".into()
+        },
         ..State::default()
     };
     out.emit(&state);
@@ -491,6 +524,17 @@ fn run(
                                 busy_until = busy_until.max(Instant::now() + ACTIVE_FOR);
                             }
 
+                            // a short press of the power button, handed to us (see config::Buttons): the
+                            // headset flips 0x520 on each press
+                            if pushed
+                                && let (Some(new), Some(old)) =
+                                    (kvp.get("520"), state.keys.get("520"))
+                                && new != old
+                                && let Some(write) = power_button(&cfg.buttons.power, &state.keys)
+                            {
+                                token = token.wrapping_add(1);
+                                outbox.push_back(race::set_kvp("720", &write, token));
+                            }
                             state.keys.extend(
                                 kvp.iter()
                                     .filter(|(k, _)| pushed || *k != "510")
