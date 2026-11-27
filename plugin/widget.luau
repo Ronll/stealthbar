@@ -10,19 +10,18 @@ local function render(s)
   end
 
   local battery = if type(s.battery) == "number" then s.battery else nil
+  local low_now = battery ~= nil and battery <= low and not s.charging
+  local children = { ui.glyph({ name = "headphones", color = if low_now then "error" else nil }) }
+  if battery then
+    table.insert(children, ui.label({ text = `{battery}%`, color = if low_now then "error" else nil }))
+  end
+  if s.charging then
+    table.insert(children, ui.glyph({ name = "bolt" }))
+  end
   if s.mic_muted then
-    barWidget.setGlyph("microphone-off")
-  elseif s.charging then
-    barWidget.setGlyph("battery-charging")
-  else
-    barWidget.setGlyph("headphones")
+    table.insert(children, ui.glyph({ name = "microphone-off", color = "error" }))
   end
-  barWidget.setText(if battery then `{battery}%` else "")
-  if battery and battery <= low and not s.charging then
-    barWidget.setGlyphColor("error")
-  else
-    barWidget.setGlyphColor("on_surface")
-  end
+  barWidget.render(ui.row({ gap = 4, align = "center" }, children))
 
   barWidget.setTooltip({
     { key = "Stealth Pro II battery", value = if battery then `{battery}%` else "unknown" },

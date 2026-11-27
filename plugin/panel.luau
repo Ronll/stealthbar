@@ -30,12 +30,10 @@ end
 
 local function header(s)
   local battery = if type(s.battery) == "number" then `{s.battery}%` else "—"
-  local glyph = if s.charging then "battery-charging" else "headphones"
   return ui.row({ align = "center", gap = 10 }, {
-    ui.glyph({ name = glyph, size = 22, color = "primary" }),
+    ui.glyph({ name = "headphones", size = 22, color = "primary" }),
     ui.label({ text = "Stealth Pro II", fontSize = 16, fontWeight = "bold", color = "on_surface", flexGrow = 1 }),
     ui.label({ text = battery, fontSize = 16, fontWeight = "bold", color = "on_surface" }),
-    ui.button({ glyph = "close", variant = "ghost", onClick = function() panel.close() end }),
   })
 end
 

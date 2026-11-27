@@ -130,13 +130,14 @@ Settings:
 
 What the UI shows:
 
-- **Bar capsule:** hidden while `on` is false. Otherwise a glyph (`microphone-off` if muted, `battery-charging`
-  while charging, else `headphones`), the battery percent, and a tooltip (battery, charging, mic).
+- **Bar capsule:** hidden while `on` is false. Otherwise a headphones glyph and the battery percent (both red at
+  or below `low_battery` unless charging), a bolt while charging, a red `microphone-off` glyph while the mic is
+  muted, and a tooltip (battery, charging, mic).
 - **Panel** (click the capsule, or `noctalia msg panel-toggle ronll/stealthbar:panel`): battery (headset, charging,
   spare battery in the dock), microphone (boom/built-in, muted, sensitivity, monitoring, AI noise reduction, noise
   gate), sound (volume, game/chat mix, noise cancellation, Superhuman Hearing, game and mic EQ presets), controls
   (lower wheel and mode button jobs, auto off, wake on motion), device (name, headset and transmitter product ids
-  and firmware). Read-only.
+  and firmware). Read-only; it closes when you click outside it.
 
 Only the service runs the daemon. Don't run a second `stealthbar watch` (or Neap, or swarm2linux) at the same time:
 every reader takes replies off the same dock queue, so each would miss some.
