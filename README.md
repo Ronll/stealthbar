@@ -169,8 +169,9 @@ How it behaves:
 - The wheel position is 0 (game only) … 50 (centre) … 100 (chat only). Same curve as Neap: the centre leaves
   everything at full volume; turning toward game lowers the chat apps (to silent at the end), turning toward chat
   lowers the rest if `duck_game` is on.
-- Volumes are set per stream with `wpctl set-volume <stream id> <gain>`, on every wheel move and every 5 s (for chat
-  streams that appear later). Your own per-app volume for those streams is overwritten while this is on.
+- Volumes are set per stream with `wpctl set-volume <stream id> <gain>`: every matching stream when the wheel
+  moves, and a stream that appears later (checked every 5 s) once. In between, volume changes made with other
+  tools (pavucontrol, a key binding) are kept until the wheel moves again.
 - Nothing is changed until the wheel actually moves after the headset connects (a fresh read reports 0, which would
   otherwise mean "game only").
 - **Writes to the headset** (only with `enabled = true`; the same keys and values Swarm II/Neap write): `0x500 = 1`
@@ -257,7 +258,7 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
   Release builds use LTO and are stripped (about 0.5 MB on disk).
 - It does not depend on the headset being the default audio sink; it works with the dock as long as it is
   plugged in. The chat mix touches PipeWire only when the wheel moves and every 5 s while it is enabled and the
-  headset is on (one `pw-dump`, and a `wpctl` only for streams whose volume is off target).
+  headset is on (one `pw-dump`; a `wpctl` only when the wheel moved or for a new stream).
 
 ## Volume and the stuck dock
 

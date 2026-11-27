@@ -3,6 +3,7 @@
 //! PC applies it. Same curve as Neap: the centre leaves both at full level, moving off centre lowers the side
 //! being moved away from.
 
+use std::collections::HashSet;
 use std::process::Command;
 
 use serde_json::Value;
@@ -17,9 +18,10 @@ pub fn game_gain(mix: u8) -> f64 {
     (2.0 * (1.0 - f64::from(mix.min(100)) / 100.0)).min(1.0)
 }
 
-/// Set the volume of every playback stream: chat apps to the chat gain, the rest to the game gain if
-/// `duck_game`. Streams already at the target are left alone. Needs `pw-dump` and `wpctl` (PipeWire).
-pub fn apply(cfg: &ChatMix, mix: u8) {
+/// Set playback stream volumes: chat apps to the chat gain, the rest to the game gain if `duck_game`.
+/// With `all` (the wheel moved) every matching stream is set; otherwise only streams not in `seen` (new ones),
+/// so volume changes made by other tools in between are kept. Needs `pw-dump` and `wpctl` (PipeWire).
+pub fn apply(cfg: &ChatMix, mix: u8, seen: &mut HashSet<u64>, all: bool) {
     let Ok(out) = Command::new("pw-dump").output() else {
         eprintln!("stealthbar: chat mix needs pw-dump (PipeWire)");
         return;
@@ -42,6 +44,9 @@ pub fn apply(cfg: &ChatMix, mix: u8) {
         let (Some(id), Some(current)) = (o["id"].as_u64(), volume(o)) else {
             continue;
         };
+        if !seen.insert(id) && !all {
+            continue;
+        }
         if (current - target).abs() > 0.005 {
             let _ = Command::new("wpctl")
                 .args(["set-volume", &id.to_string(), &format!("{target:.3}")])

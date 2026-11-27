@@ -42,7 +42,7 @@ const RETRY_OFF: Duration = Duration::from_secs(10);
 /// The headset drops subscriptions when it restarts; subscribe again this long after it links up.
 const RESUBSCRIBE_AFTER_LINK: Duration = Duration::from_millis(1500);
 const RESCAN: Duration = Duration::from_secs(2);
-/// Re-apply the chat mix this often, for chat streams that appeared since the wheel last moved.
+/// Look for new chat streams this often, to give them the current mix.
 const MIX_REFRESH: Duration = Duration::from_secs(5);
 
 /// Records the headset answers (each owns a key range: Inf 1xx, GSI 2xx, 3DT 5xx, Mic 6xx, SAF 7xx, Enc axx,
@@ -253,6 +253,7 @@ fn run(
     let mut mix_setup_done = false;
     let mut last_mix: Option<u8> = None;
     let mut mix_applied_at = Instant::now();
+    let mut mix_seen = HashSet::new();
     let chat = &cfg.chat_mix;
 
     loop {
@@ -345,7 +346,7 @@ fn run(
             if let Some(m) = mix
                 && (mix != last_mix || now.duration_since(mix_applied_at) > MIX_REFRESH)
             {
-                mix::apply(chat, m);
+                mix::apply(chat, m, &mut mix_seen, mix != last_mix);
                 last_mix = mix;
                 mix_applied_at = Instant::now();
             }
