@@ -140,8 +140,8 @@ What the UI shows:
   put while the content scrolls.
   - **Overview** (opens first): headset and spare-in-dock batteries with bars (bolt while charging, red at or below
     `low_battery`); noise cancellation on/off, ambient↔ANC level, Superhuman Hearing on/off; which mic is in use
-    and whether it's muted; chat wheel value (Discord volume); connection (2.4 GHz or USB, Bluetooth and its
-    signal) and system volume.
+    and whether it's muted; volume (the headset's system volume and the chat wheel's Discord volume, with bars);
+    connection (2.4 GHz or USB, Bluetooth and its signal).
   - **Sound:** game EQ (preset buttons incl. named custom presets, 10 band sliders); Superhuman Hearing (on/off,
     mode buttons, level); loudness boost.
   - **Mic:** mic in use, monitoring, AI noise reduction, built-in mute, sensitivity; noise gate on/off and level;

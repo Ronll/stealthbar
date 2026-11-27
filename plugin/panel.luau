@@ -227,14 +227,13 @@ local function overview(s, d)
         ui.label({ text = micText, color = "on_surface", flexGrow = 1 }),
       }),
     }, "microphone"),
-    section("Chat wheel", {
-      row("Discord volume", str(d.chat_mix, "%")),
-      ui.progress({ progress = (d.chat_mix or 0) / 100, height = 4, radius = 2, fill = "primary" }),
-    }, "messages"),
-    section("Connection", {
-      row(via, bt),
-      row("System volume", str(d.volume, "%")),
-    }, "antenna-bars-5"),
+    section("Volume", {
+      row("Headset (system volume)", str(d.volume, "%")),
+      ui.progress({ progress = (d.volume or 0) / 100, height = 4, radius = 2, fill = "primary" }),
+      row("Discord (chat wheel)", str(d.chat_mix, "%")),
+      ui.progress({ progress = (d.chat_mix or 0) / 100, height = 4, radius = 2, fill = "secondary" }),
+    }, "volume"),
+    section("Connection", { row(via, bt) }, "antenna-bars-5"),
   }
 end
 
