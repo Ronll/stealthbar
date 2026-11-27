@@ -5,10 +5,82 @@
 
 use std::collections::HashSet;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::config::ChatMix;
+
+/// The wheel is a free-spinning encoder: the headset reports a 0-100 count of notches that is not where the
+/// wheel physically sits (it stops at 0 and 100 while the wheel keeps turning). So only the movement between two
+/// readings moves the mix, which is kept here, starting at the centre. Stray readings happen (Neap measured one
+/// notch reading 10 straight after 50): the first reading after the wheel was at rest that jumps more than a
+/// notch's worth is held until the next reading confirms it.
+pub struct Wheel {
+    pub mix: u8,
+    last: Option<i64>,
+    seen_at: Option<Instant>,
+    doubted: Option<i64>,
+}
+
+const REST: Duration = Duration::from_millis(500);
+const FIRST_NOTCH_LIMIT: i64 = 15;
+
+impl Default for Wheel {
+    fn default() -> Self {
+        Self {
+            mix: 50,
+            last: None,
+            seen_at: None,
+            doubted: None,
+        }
+    }
+}
+
+impl Wheel {
+    /// Forget the count (after a reconnect the next reading is only a starting point); the mix stays.
+    pub fn restart(&mut self) {
+        self.last = None;
+        self.doubted = None;
+    }
+
+    pub fn started(&self) -> bool {
+        self.last.is_some()
+    }
+
+    /// Take a reading of the count; true when the mix moved.
+    pub fn read(&mut self, count: i64, now: Instant) -> bool {
+        let rested = self.seen_at.is_none_or(|t| now.duration_since(t) >= REST);
+        self.seen_at = Some(now);
+        let near = |a: i64, b: i64| (a - b).abs() <= FIRST_NOTCH_LIMIT;
+        let Some(mut last) = self.last else {
+            self.last = Some(count);
+            return false;
+        };
+        if let Some(doubted) = self.doubted.take() {
+            if near(count, doubted) {
+                last = doubted; // the count really moved while we weren't looking
+            } else if !near(count, last) {
+                self.last = Some(count); // neither fits: start over from here
+                return false;
+            } // else: the far reading was stray, continue from `last`
+        } else if rested && !near(count, last) {
+            self.doubted = Some(count);
+            return false;
+        }
+        self.last = Some(count);
+        let old = i64::from(self.mix);
+        let mut mix = (old + count - last).clamp(0, 100);
+        // centre detent (as Neap): a move onto or across 50 stops there, so "both at full" is easy to hit
+        if (old < 50 && mix > 50) || (old > 50 && mix < 50) {
+            mix = 50;
+        }
+        let mix = mix as u8;
+        let moved = mix != self.mix;
+        self.mix = mix;
+        moved
+    }
+}
 
 pub fn chat_gain(mix: u8) -> f64 {
     (2.0 * f64::from(mix.min(100)) / 100.0).min(1.0)
@@ -89,6 +161,32 @@ mod tests {
         assert_eq!((chat_gain(0), game_gain(0)), (0.0, 1.0));
         assert_eq!((chat_gain(100), game_gain(100)), (1.0, 0.0));
         assert_eq!(chat_gain(25), 0.5);
+    }
+
+    #[test]
+    fn wheel_moves_by_steps_and_skips_strays() {
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        let mut w = Wheel::default();
+        assert!(!w.read(80, ms(0))); // starting point only
+        assert!(w.read(74, ms(100)) && w.mix == 44);
+        // crossing the centre stops at 50, the next notch moves on
+        let mut c = Wheel::default();
+        c.read(0, ms(0));
+        assert!(c.read(5, ms(100)) && c.mix == 55);
+        assert!(c.read(-5, ms(200)) && c.mix == 50);
+        assert!(c.read(-10, ms(300)) && c.mix == 45);
+        assert!(w.read(68, ms(200)) && w.mix == 38);
+        // after a rest, a far jump is held, then dropped when the next reading is near the old count
+        assert!(!w.read(10, ms(2000)));
+        assert!(w.read(65, ms(2100)) && w.mix == 35);
+        // after a rest, a far jump confirmed by the next reading becomes the new starting point
+        assert!(!w.read(20, ms(4000)));
+        assert!(w.read(17, ms(4100)) && w.mix == 32);
+        // clamps
+        assert!(w.read(0, ms(4200)) && w.mix == 15);
+        w.restart();
+        assert!(!w.read(90, ms(9000)) && w.mix == 15);
     }
 
     #[test]

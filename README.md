@@ -167,14 +167,22 @@ set_wheel = true          # make the lower left wheel the game/chat wheel (PC pl
 
 How it behaves:
 
-- The wheel position is 0 (game only) … 50 (centre) … 100 (chat only). Same curve as Neap: the centre leaves
-  everything at full volume; turning toward game lowers the chat apps (to silent at the end), turning toward chat
-  lowers the rest if `duck_game` is on.
-- Volumes are set per stream with `wpctl set-volume <stream id> <gain>`: every matching stream when the wheel
-  moves, and a stream that appears later (checked every 5 s) once. In between, volume changes made with other
-  tools (pavucontrol, a key binding) are kept until the wheel moves again.
-- Nothing is changed until the wheel actually moves after the headset connects (a fresh read reports 0, which would
-  otherwise mean "game only").
+- The daemon keeps its own mix, 0 (game only) … 50 (centre) … 100 (chat only), starting at 50. Same curve as
+  Neap: the centre leaves everything at full volume; toward game lowers the chat apps (to silent at the end),
+  toward chat lowers the rest if `duck_game` is on.
+- The wheel is a free-spinning encoder: the headset reports a 0–100 notch count (`0x510`) that is not where the
+  wheel sits and sticks at 0/100 while the wheel keeps turning. So only the **movement** between readings moves
+  the mix (as Neap does). The first reading after a (re)connect is just a starting point; a far jump right after
+  the wheel was at rest (≥ 0.5 s) is held until the next reading confirms it (stray readings happen); a move onto
+  or across 50 stops at 50 (centre detent).
+- Volumes are set per stream with `wpctl set-volume <stream id> <gain>`: every matching stream when the mix
+  moves, and a stream that appears later (checked every 2 s) once. In between, volume changes made with other
+  tools (pavucontrol, a key binding) are kept until the wheel moves again. A chat app that is silent has no
+  stream, so there is nothing to set; PipeWire restores the app's last volume when it plays again, and the
+  daemon then applies the current mix within 2 s.
+- Nothing is changed until the wheel has moved since the daemon started.
+- While the chat mix is enabled and the headset is on, the dock is polled every 100 ms (instead of 500 ms) so the
+  wheel responds at once and a burst of wheel reports can't overflow the dock's queue.
 - **Writes to the headset** (only with `enabled = true`; the same keys and values Swarm II/Neap write): `0x500 = 1`
   after every connect (the headset only reports the wheel while it is set, and clears it at each connect), and
   with `set_wheel`, `0xa20 = 2` (the PC platform's lower-wheel job: 1 mic monitoring (factory default), 2 game/chat
@@ -202,7 +210,7 @@ Every line is a complete JSON object (no partial updates); a new line is printed
 | `headset.product`, `.firmware`, `.name` | headset USB id (`110`), firmware (`130`), name set in Swarm II (`220`) |
 | `transmitter.product`, `.firmware`, `.spare_battery` | the transmitter the headset uses (slot records `400`–`460`); spare battery % in a charging dock |
 | `volume` | master volume 0–100 as the headset sees it (`2a0`; mirrors the system volume, read-only) |
-| `chat_mix` | game/chat wheel 0–100, only once reports are on and the wheel moved (`510`) |
+| `chat_mix` | the daemon's game/chat mix 0–100 (moved by the wheel, see the config section); null until the wheel reported (`510`) |
 | `mic.source` | `"boom"` or `"built-in"` (`640`) |
 | `mic.muted`, `.sensitivity`, `.monitoring`, `.noise_reduction` | mute (`600`/`650`), sensitivity % (`610`, follows the system mic level), sidetone % (`620`), AI noise reduction (`630`) |
 | `noise_gate.on`, `.level` | `700`, `710` |
@@ -229,7 +237,7 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
   containing usage page `0xFF13`. Rescans every 2 s while nothing is found or after the device disappears.
 - **Transport:** HID output report `0x06` / input report `0x07`, 62 bytes each. Requests are written with `write()`
   (the interface has no OUT endpoint, so the kernel sends SET_REPORT). **Replies come only from GET_REPORT(Input 7)**
-  (`HIDIOCGINPUT`), never on the interrupt endpoint, so the daemon polls: every 500 ms when idle (2 s while the
+  (`HIDIOCGINPUT`), never on the interrupt endpoint, so the daemon polls: every 500 ms when idle (100 ms with the chat mix, 2 s while the
   headset is off), every 15 ms while requests or replies are in flight. The input side is a byte stream: packets span reports. Requests go out
   **one at a time** (next one after the reply, or after 600 ms): sending them back to back overflows the dock's
   reply queue and loses records.
@@ -253,9 +261,10 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
   - *no dock plugged in:* one directory scan of `/sys/class/hidraw` every 2 s; no device is opened.
   - *dock plugged in, headset off:* one USB control transfer (GET_REPORT) every 2 s, plus a 13-request ask every
     10 s to catch a headset that came on without a link message.
-  - *headset on:* one GET_REPORT every 500 ms (changes are pushed by the headset into the dock's queue and picked up
+  - *headset on:* one GET_REPORT every 500 ms (100 ms while the chat mix is enabled) (changes are pushed by the headset into the dock's queue and picked up
     at the next poll), a re-ask every 60 s as heartbeat; bursts of 15 ms polling only while replies are arriving.
-- **Measured** (headset on, x86-64 laptop): about 0.03 % of one CPU core, 2.7 MB resident memory, one thread.
+- **Measured** (headset on, x86-64 laptop): about 0.03 % of one CPU core (0.13 % with the chat mix's 100 ms
+  polling), 2.8 MB resident memory, one thread.
   Release builds use LTO and are stripped (about 0.5 MB on disk).
 - It does not depend on the headset being the default audio sink; it works with the dock as long as it is
   plugged in. The chat mix touches PipeWire only when the wheel moves and every 5 s while it is enabled and the

@@ -43,7 +43,10 @@ const RETRY_OFF: Duration = Duration::from_secs(10);
 const RESUBSCRIBE_AFTER_LINK: Duration = Duration::from_millis(1500);
 const RESCAN: Duration = Duration::from_secs(2);
 /// Look for new chat streams this often, to give them the current mix.
-const MIX_REFRESH: Duration = Duration::from_secs(5);
+const MIX_REFRESH: Duration = Duration::from_secs(2);
+/// Idle poll while the chat mix is on and the headset is on, so the wheel feels immediate and a burst of
+/// wheel reports never overflows the dock's queue.
+const IDLE_POLL_MIX: Duration = Duration::from_millis(100);
 
 /// Records the headset answers (each owns a key range: Inf 1xx, GSI 2xx, 3DT 5xx, Mic 6xx, SAF 7xx, Enc axx,
 /// Btn bxx, AQG 12xx, AQM 13xx). GSI answering is what "on" means.
@@ -59,6 +62,8 @@ struct State {
     on: bool,
     device: Option<String>,
     keys: Keys,
+    /// The game/chat mix kept by the daemon (see mix::Wheel); None until the wheel has reported.
+    mix: Option<u8>,
 }
 
 impl State {
@@ -71,7 +76,13 @@ impl State {
             "charging": decode::charging(k),
             "mic_muted": decode::mic_muted(k),
             "device": self.device,
-            "details": if self.on { decode::details(k) } else { Value::Null },
+            "details": if self.on {
+                let mut d = decode::details(k);
+                d["chat_mix"] = json!(self.mix);
+                d
+            } else {
+                Value::Null
+            },
         })
     }
 }
@@ -251,7 +262,9 @@ fn run(
     let mut busy_until = Instant::now();
     // per connection: the chat-mix writes (enable wheel reports, wheel job) are sent once all records are in
     let mut mix_setup_done = false;
-    let mut last_mix: Option<u8> = None;
+    let mut wheel = mix::Wheel::default();
+    let mut mix_moved = false;
+    let mut wheel_moved_once = false;
     let mut mix_applied_at = Instant::now();
     let mut mix_seen = HashSet::new();
     let chat = &cfg.chat_mix;
@@ -287,6 +300,7 @@ fn run(
                         state.on = false;
                     }
                     state.keys.remove("510");
+                    wheel.restart();
                     mix_setup_done = false;
                 }
                 CMD_KVP => {
@@ -302,6 +316,18 @@ fn run(
                             // a read answers 0x510 = 0 before the wheel has moved (a real 0 means game
                             // only): take the wheel position only from pushes, which come when it turns
                             let pushed = doc.get("UP").is_some();
+                            if pushed
+                                && let Some(count) = kvp
+                                    .get("510")
+                                    .and_then(Value::as_str)
+                                    .and_then(|v| v.parse().ok())
+                                && wheel.read(count, Instant::now())
+                            {
+                                mix_moved = true;
+                            }
+                            if wheel.started() {
+                                state.mix = Some(wheel.mix);
+                            }
                             state.keys.extend(
                                 kvp.iter()
                                     .filter(|(k, _)| pushed || *k != "510")
@@ -342,12 +368,14 @@ fn run(
                 }
                 mix_setup_done = true;
             }
-            let mix = decode::chat_mix(&state.keys);
-            if let Some(m) = mix
-                && (mix != last_mix || now.duration_since(mix_applied_at) > MIX_REFRESH)
+            // nothing is touched until the wheel has moved since the daemon started
+            if state.mix.is_some()
+                && (mix_moved || now.duration_since(mix_applied_at) > MIX_REFRESH)
+                && (wheel_moved_once || mix_moved)
             {
-                mix::apply(chat, m, &mut mix_seen, mix != last_mix);
-                last_mix = mix;
+                mix::apply(chat, wheel.mix, &mut mix_seen, mix_moved);
+                wheel_moved_once = true;
+                mix_moved = false;
                 mix_applied_at = Instant::now();
             }
         }
@@ -368,6 +396,8 @@ fn run(
             || report.get(1).is_some_and(|&n| n > 0);
         sleep(if busy {
             BUSY_POLL
+        } else if state.on && chat.enabled {
+            IDLE_POLL_MIX
         } else if state.on {
             IDLE_POLL_ON
         } else {

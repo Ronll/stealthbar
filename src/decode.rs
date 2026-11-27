@@ -40,16 +40,6 @@ pub fn mic_muted(keys: &Keys) -> bool {
     .unwrap_or(false)
 }
 
-/// The wheel position, only while reports are switched on (0x500 = 1); otherwise 0x510 is stale.
-pub fn chat_mix(keys: &Keys) -> Option<u8> {
-    if num(keys, "500") != Some(1) {
-        return None;
-    }
-    num(keys, "510")
-        .filter(|m| (0..=100).contains(m))
-        .map(|m| m as u8)
-}
-
 fn wheel_job(v: Option<i64>) -> Option<&'static str> {
     Some(match v? {
         1 => "mic monitoring",
@@ -98,7 +88,6 @@ pub fn details(keys: &Keys) -> Value {
         },
         "transmitter": transmitter(keys),
         "volume": num(keys, "2a0"),
-        "chat_mix": chat_mix(keys),
         "mic": {
             "source": match num(keys, "640") { Some(1) => Some("boom"), Some(2) => Some("built-in"), _ => None },
             "muted": mic_muted(keys),
