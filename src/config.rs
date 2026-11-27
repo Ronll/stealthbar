@@ -1,5 +1,5 @@
 //! Optional config file: `$XDG_CONFIG_HOME/stealthbar/config.toml` (default `~/.config/stealthbar/config.toml`),
-//! or the path in `$STEALTHBAR_CONFIG`. A missing file means defaults (chat mix and make_default off).
+//! or the path in `$STEALTHBAR_CONFIG`. A missing file means defaults (chat mix and follow_headset off).
 
 use std::path::PathBuf;
 
@@ -15,9 +15,9 @@ pub struct Config {
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Audio {
-    /// When the headset turns on (also when the daemon starts with it on), make the dock's sink and source the
-    /// default output and input.
-    pub make_default: bool,
+    /// Turn the dock's sound card profile off while the headset is off (and back on), so it disappears from
+    /// PipeWire like a disconnected Bluetooth headset and WirePlumber picks the default from its own history.
+    pub follow_headset: bool,
 }
 
 /// How the wheel's 0-100 value is applied.
@@ -96,9 +96,9 @@ mod tests {
         assert_eq!(c.chat_mix.mode, Mode::Crossfade);
         assert!(c.chat_mix.apps.iter().any(|a| a == "discord"));
         assert!(!Config::default().chat_mix.enabled);
-        assert!(!Config::default().audio.make_default);
-        let c: Config = toml::from_str("[audio]\nmake_default = true\n").unwrap();
-        assert!(c.audio.make_default);
+        assert!(!Config::default().audio.follow_headset);
+        let c: Config = toml::from_str("[audio]\nfollow_headset = true\n").unwrap();
+        assert!(c.audio.follow_headset);
         assert!(toml::from_str::<Config>("[chat_mix]\nbogus = 1\n").is_err());
     }
 }

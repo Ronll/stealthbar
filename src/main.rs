@@ -16,8 +16,16 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+
+/// Set by SIGTERM/SIGINT/SIGHUP: `watch` returns from its loops, so cleanup (the dock's sound profile) runs.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    STOP.store(true, Ordering::Relaxed);
+}
 
 use decode::Keys;
 use race::{CMD_KVP, CMD_LINK, REPORT_IN, REPORT_LEN, Reassembler};
@@ -57,6 +65,8 @@ const MIX_REFRESH: Duration = Duration::from_secs(2);
 /// A value just written counts as current for this long, or until the headset pushes it back, so a second
 /// `set … toggle` / `eq next` from a quick key press builds on the first instead of the stale value.
 const PENDING_FOR: Duration = Duration::from_secs(3);
+/// `[audio] follow_headset`: the headset counts as off for the dock's sound card after this long without answers.
+const OFF_FOR: Duration = Duration::from_secs(8);
 const ACTIVE_FOR: Duration = Duration::from_secs(1);
 
 /// Records the headset answers (each owns a key range: Inf 1xx, GSI 2xx, 3DT 5xx, Mic 6xx, SAF 7xx, Enc axx,
@@ -135,6 +145,14 @@ fn main() {
 }
 
 fn watch() {
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        unsafe {
+            libc::signal(
+                sig,
+                on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+    }
     let mut out = Emitter::default();
     let cfg = config::load();
     let listener = match control::listen() {
@@ -144,7 +162,7 @@ fn watch() {
             std::process::exit(1);
         }
     };
-    loop {
+    while !STOP.load(Ordering::Relaxed) {
         match find_device() {
             Some((path, product)) => {
                 if let Err(e) = run(&path, &product, &mut out, &cfg, Some(&listener)) {
@@ -155,7 +173,7 @@ fn watch() {
         }
         // keep answering `status` (and refusing `set`) while no dock is plugged in
         let until = Instant::now() + RESCAN;
-        while Instant::now() < until {
+        while Instant::now() < until && !STOP.load(Ordering::Relaxed) {
             control::wait(Some(&listener), until - Instant::now());
             control::serve(&listener, |cmd| match cmd {
                 control::Cmd::Status => Ok(out
@@ -372,7 +390,9 @@ fn run(
     let mut busy_until = Instant::now();
     // per connection: the chat-mix writes (enable wheel reports, wheel job) are sent once all records are in
     let mut mix_setup_done = false;
-    let mut was_on = false;
+    let follower = (!once && cfg.audio.follow_headset).then(|| audio::Follower::spawn(product));
+    let mut told: Option<bool> = None;
+    let mut off_since: Option<Instant> = None;
     let mut pending: HashMap<String, (String, Instant)> = HashMap::new();
     let mut wheel = mix::Wheel::new(cfg.chat_mix.mode == config::Mode::Crossfade);
     let mut mix_moved = false;
@@ -381,6 +401,9 @@ fn run(
     let chat = &cfg.chat_mix;
 
     loop {
+        if STOP.load(Ordering::Relaxed) {
+            return Ok(()); // dropping `follower` gives the dock its sound back
+        }
         let now = Instant::now();
         if next_ask.is_some_and(|t| now >= t) {
             // While off, and as the heartbeat once everything is in, only GSI: each unanswered request costs
@@ -549,10 +572,23 @@ fn run(
                 next_ask.get_or_insert(Instant::now() + retry);
             }
         }
-        if state.on && !was_on && !once && cfg.audio.make_default {
-            audio::make_default(product);
+        // `[audio] follow_headset`: tell the profile thread about changes. "Off" only after OFF_FOR without an
+        // answer, so a daemon start (the state begins as off) or a dropped reply doesn't flick the card off.
+        if let Some(f) = &follower {
+            if state.on {
+                off_since = None;
+                if told != Some(true) {
+                    f.headset(true);
+                    told = Some(true);
+                }
+            } else {
+                let since = *off_since.get_or_insert(now);
+                if told != Some(false) && now.duration_since(since) >= OFF_FOR {
+                    f.headset(false);
+                    told = Some(false);
+                }
+            }
         }
-        was_on = state.on;
         if !state.on {
             mix_setup_done = false;
             seen.clear();

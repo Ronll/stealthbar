@@ -209,7 +209,7 @@ stealthbar set anc toggle`.)
 `"exec": "stealthbar watch | jq --unbuffered -c '{text: (if .on then \"🎧 \\(.battery)%\" else \"\" end)}'"`
 with `"return-type": "json"`.
 
-## Config file: game/chat wheel → app volumes, default audio device
+## Config file: game/chat wheel → app volumes, sound card follows the headset
 
 Optional. Read once at start from `$STEALTHBAR_CONFIG`, else `$XDG_CONFIG_HOME/stealthbar/config.toml`
 (default `~/.config/stealthbar/config.toml`; `stealthbar config-path` prints it). Missing file = defaults (off).
@@ -227,14 +227,32 @@ duck_game = false         # crossfade only: also lower every other stream while 
 set_wheel = true          # make the lower left wheel the game/chat wheel (PC platform) on every connect
 
 [audio]
-make_default = false      # true: when the headset turns on, make it the default output and input
+follow_headset = false    # true: the dock's sound card disappears while the headset is off, like Bluetooth
 ```
 
-**`[audio] make_default`**: the dock's sound card exists whenever the dock is plugged in, headset on or not, so the
-desktop can't tell when to switch to it. With this on, each time the headset turns on (and when the daemon starts
-with it on) the daemon runs `wpctl set-default` for the dock's sink and source: the PipeWire nodes of the device
-with `device.vendor.id` `0x10f5` and the dock's product id. Nothing is switched back when the headset turns off;
-WirePlumber keeps the dock as the default. Needs `pw-dump` and `wpctl` (PipeWire + WirePlumber).
+**`[audio] follow_headset`**: the dock's sound card exists whenever the dock is plugged in, headset on or not, so
+PipeWire keeps it as the default output even while the headset is off, and sound goes nowhere. A Bluetooth headset
+doesn't have this problem because its sink disappears when it disconnects. With this on, the dock behaves the same
+way:
+
+- 8 s after the headset stops answering, the daemon sets the card's profile to `off`, so its sink and source go
+  away. When the headset turns on, it sets the profile back (the one that was active before, else the available
+  profile with the highest priority).
+- The daemon never sets the default device itself. WirePlumber chooses it from its own history of devices the user
+  picked (`~/.local/state/wireplumber/default-nodes`): while the headset is off, the most recently picked device
+  that is present; when it comes back, the headset again if it was the one picked. So pick the headset as the
+  default once (in your shell's audio menu or with `wpctl set-default`), and later choices stay yours.
+- Profiles are switched with `pw-cli set-param <device> Profile '{ index: N, save: false }'`. `save: false` keeps
+  WirePlumber from storing `off` in its default-profile state, so after a reboot, replug or WirePlumber restart the
+  card comes back normal; if stealthbar is not running, nothing changes compared to not having it. `wpctl
+  set-profile` and pavucontrol always save, so they are not used. While the headset is off the profile is checked
+  every 10 s, because WirePlumber turns the normal profile back on by itself after a restart or a profile change
+  on any card.
+- When the daemon stops (SIGTERM/SIGINT/SIGHUP) it gives the card its sound back first.
+- Only the sound card is affected; the dock's HID interface (battery, settings, headset on/off) is a separate USB
+  interface. Apps that were moved to the headset by hand (pinned to it) don't follow the default; they stay on it
+  and are silent while it's off.
+- Needs `pw-dump` and `pw-cli` (PipeWire + WirePlumber 0.5).
 
 How the game/chat wheel behaves:
 
@@ -427,7 +445,7 @@ per-process session byte), so replies to someone else's requests stand out.
 | `src/decode.rs` | raw keys → `battery`, `mic_muted`, `details`; the place to add a decoded field |
 | `src/config.rs` | config file location and schema |
 | `src/mix.rs` | game/chat mix curve and PipeWire stream volumes (`pw-dump`, `wpctl`) |
-| `src/audio.rs` | `[audio] make_default`: the dock's sink and source become the defaults when the headset turns on |
+| `src/audio.rs` | `[audio] follow_headset`: the dock's sound card profile off while the headset is off (unsaved), back when it's on |
 | `plugin/plugin.toml` | Noctalia manifest: id `ronll/stealthbar`, service, widget, panel, settings |
 | `plugin/service.luau` | runs `stealthbar watch` once, publishes each line as state `stealthbar.status`; runs `stealthbar set` for the panel |
 | `plugin/widget.luau` | bar capsule from `stealthbar.status`; click toggles the panel |
