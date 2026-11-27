@@ -136,15 +136,23 @@ What the UI shows:
   state (`microphone`, or a red `microphone-off` while muted) above the battery percent (with a bolt while
   charging; red at or below `low_battery` unless charging), plus a tooltip (battery, charging, mic).
 - **Panel** (click the capsule, or `noctalia msg panel-toggle ronll/stealthbar:panel`; closes when you click
-  outside it), top to bottom: battery (headset, headset charging, spare in the dock, "charging" while below 100 %);
-  sound (system volume, chat wheel, noise cancellation on/off and ambient↔ANC level, Superhuman Hearing on/off,
-  mode and level, loudness boost); game EQ (preset incl. named custom presets, 10 band sliders); microphone (boom or
-  built-in, boom arm state, built-in mute, sensitivity, monitoring, AI noise reduction, noise gate on/off and
-  level); mic EQ (preset, 10 bands); controls (lower wheel and mode button jobs for PC, PlayStation and Xbox);
-  power and lights (auto off, wake on motion, voice prompt volume, dock status light and battery slot light);
-  device (name, headset and transmitter ids and firmware, 2.4 GHz or USB, Bluetooth and its signal, protocol
-  version); raw values (every key the headset reported, sorted). Toggles and dropdowns apply at once, sliders on
-  release; each control shows what the headset reports back, so a change the headset refuses springs back.
+  outside it): a header (headset, battery) and four tabs, ordered by how often they're needed. The tab bar stays
+  put while the content scrolls.
+  - **Overview** (opens first): headset and spare-in-dock batteries with bars (bolt while charging, red at or below
+    `low_battery`); noise cancellation on/off, ambient↔ANC level, Superhuman Hearing on/off; which mic is in use
+    and whether it's muted; chat wheel value (Discord volume); connection (2.4 GHz or USB, Bluetooth and its
+    signal) and system volume.
+  - **Sound:** game EQ (preset buttons incl. named custom presets, 10 band sliders); Superhuman Hearing (on/off,
+    mode buttons, level); loudness boost.
+  - **Mic:** mic in use, monitoring, AI noise reduction, built-in mute, sensitivity; noise gate on/off and level;
+    mic EQ (preset buttons, 10 bands).
+  - **Device:** mode button and lower wheel jobs (PC); auto off, wake on motion, voice prompt volume, dock status
+    and battery-slot lights; the PlayStation/Xbox jobs; about (name, ids, firmware, protocol); raw values (every
+    key the headset reported, sorted).
+
+  Toggles, buttons and dropdowns apply at once, sliders on release; each control shows what the headset reports
+  back, so a change the headset refuses springs back. While the dock is present but the headset doesn't answer,
+  the panel says so and how to clear a stuck dock.
 
 Only the service runs the daemon. Don't run a second reader (Neap, swarm2linux) at the same time: every reader
 takes replies off the same dock queue, so each would miss some. A second `stealthbar watch` refuses to start, and
