@@ -236,9 +236,7 @@ with it on) the daemon runs `wpctl set-default` for the dock's sink and source: 
 with `device.vendor.id` `0x10f5` and the dock's product id. Nothing is switched back when the headset turns off;
 WirePlumber keeps the dock as the default. Needs `pw-dump` and `wpctl` (PipeWire + WirePlumber).
 
-The game/chat wheel:
-
-How it behaves:
+How the game/chat wheel behaves:
 
 - **`mode = "volume"`** (default): the wheel's value is the chat apps' volume, as mixers show it: game end 0 %
   (silent) … chat end 100 %. Nothing else is touched.
