@@ -296,8 +296,11 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
 | chat mix does nothing | config not loaded (`stealthbar config-path`, restart the service), the wheel hasn't moved yet, or the chat app's stream doesn't match `apps` (check `pw-dump` for its `application.name`) |
 | `battery` stays null | headset just had its battery swapped (reports 255); wait for a push |
 
-Debug by hand: stop the Noctalia service's daemon first (only one reader), then `stealthbar watch` in a terminal
-while switching the headset on/off, flipping the boom arm, turning the wheel or plugging in the charger.
+Debug by hand: stop the Noctalia service's daemon first (only one reader: a second reader takes replies off the
+same queue and makes both flaky), then `stealthbar watch` in a terminal while switching the headset on/off,
+flipping the boom arm, turning the wheel or plugging in the charger. `STEALTHBAR_TRACE=1` prints every report
+written and every non-empty report read as hex on stderr; replies echo the request's token bytes (byte 11 is a
+per-process session byte), so replies to someone else's requests stand out.
 
 ## Repository layout (for agents changing it)
 
