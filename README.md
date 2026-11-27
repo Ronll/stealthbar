@@ -130,9 +130,9 @@ Settings:
 
 What the UI shows:
 
-- **Bar capsule:** hidden while `on` is false. Otherwise a headphones glyph and the battery percent (both red at
-  or below `low_battery` unless charging), a bolt while charging, a red `microphone-off` glyph while the mic is
-  muted, and a tooltip (battery, charging, mic).
+- **Bar capsule:** hidden while `on` is false. Otherwise a big headphones glyph and, stacked beside it, the mic
+  state (`microphone`, or a red `microphone-off` while muted) above the battery percent (with a bolt while
+  charging; red at or below `low_battery` unless charging), plus a tooltip (battery, charging, mic).
 - **Panel** (click the capsule, or `noctalia msg panel-toggle ronll/stealthbar:panel`): battery (headset, charging,
   spare battery in the dock), microphone (boom/built-in, muted, sensitivity, monitoring, AI noise reduction, noise
   gate), sound (volume, game/chat mix, noise cancellation, Superhuman Hearing, game and mic EQ presets), controls
