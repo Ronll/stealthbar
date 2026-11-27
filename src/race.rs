@@ -24,6 +24,45 @@ pub fn subscribe(record: &str, token: u8) -> [u8; REPORT_LEN] {
     request(0x01, &body, token)
 }
 
+/// An output report reading a record once (`R` + name). The BT record answers only this, not a subscribe.
+pub fn read_once(record: &str, token: u8) -> [u8; REPORT_LEN] {
+    let mut body = vec![0x61, 0x00, b'R'];
+    body.extend_from_slice(record.as_bytes());
+    request(0x01, &body, token)
+}
+
+/// RACE command 0x000A: the headset's stored DSP parameters (Neap's DspParameter). Payload: op u16 BE (0 set,
+/// 1 read), parameter u32 BE, value u32 BE (an f32 in dB). Byte 2 bit 0x80 asks a dock/transmitter to relay it to
+/// the headset.
+pub const CMD_DSP: u16 = 0x000A;
+/// NVKey 0x5008, the playback input level before the EQ (Neap's loudness boost; factory -12 dB).
+pub const DSP_INPUT_LEVEL: u32 = 0x0004_0000;
+
+pub fn dsp(op: u16, param: u32, db: f32) -> [u8; REPORT_LEN] {
+    let mut payload = op.to_be_bytes().to_vec();
+    payload.extend_from_slice(&param.to_be_bytes());
+    payload.extend_from_slice(&db.to_bits().to_be_bytes());
+    let inner = (2 + payload.len()) as u16;
+    let mut race = vec![0x05, 0x5a];
+    race.extend_from_slice(&inner.to_le_bytes());
+    race.extend_from_slice(&CMD_DSP.to_le_bytes());
+    race.extend_from_slice(&payload);
+    let mut report = [0u8; REPORT_LEN];
+    report[0] = REPORT_OUT;
+    report[1] = race.len() as u8;
+    report[2] = 0x80;
+    report[3..3 + race.len()].copy_from_slice(&race);
+    report
+}
+
+/// The level in a 0x000A reply for `param`: payload = parameter u32 BE, value u32 BE (f32 bits).
+pub fn dsp_level(payload: &[u8], param: u32) -> Option<f32> {
+    let p: [u8; 8] = payload.try_into().ok()?;
+    (u32::from_be_bytes(p[..4].try_into().ok()?) == param)
+        .then(|| f32::from_bits(u32::from_be_bytes(p[4..].try_into().unwrap())))
+        .filter(|v| v.is_finite())
+}
+
 /// An output report writing one key, as Swarm II does: `{"0xa20":"2"}`. The JSON must stay short enough to fit
 /// one report (about 32 characters).
 pub fn set_kvp(key: &str, value: &str, token: u8) -> [u8; REPORT_LEN] {
@@ -138,6 +177,23 @@ mod tests {
             &[0x06, 0x18, 0x00, 0x05, 0x5a, 0x14, 0x00, 0x02, 0x99]
         );
         assert_eq!(&r[24..27], b"GSI");
+    }
+
+    #[test]
+    fn dsp_frames() {
+        let r = dsp(0, DSP_INPUT_LEVEL, -6.0);
+        assert_eq!(
+            &r[..9],
+            &[0x06, 0x10, 0x80, 0x05, 0x5a, 0x0c, 0x00, 0x0a, 0x00]
+        );
+        assert_eq!(&r[9..15], &[0, 0, 0, 4, 0, 0]);
+        assert_eq!(
+            f32::from_bits(u32::from_be_bytes(r[15..19].try_into().unwrap())),
+            -6.0
+        );
+        let mut reply = DSP_INPUT_LEVEL.to_be_bytes().to_vec();
+        reply.extend_from_slice(&(-12.0f32).to_bits().to_be_bytes());
+        assert_eq!(dsp_level(&reply, DSP_INPUT_LEVEL), Some(-12.0));
     }
 
     #[test]

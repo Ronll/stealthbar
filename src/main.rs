@@ -2,15 +2,18 @@
 //! See README.md for the protocol, the output format, the config file and how the Noctalia plugin uses it.
 
 mod config;
+mod control;
 mod decode;
 mod mix;
 mod race;
+mod settings;
 
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -57,8 +60,12 @@ const ACTIVE_FOR: Duration = Duration::from_secs(1);
 const RECORDS: [&str; 9] = [
     "GSI", "Inf", "Mic", "SAF", "3DT", "Enc", "Btn", "AQG", "AQM",
 ];
-/// Transmitter slots: an empty slot never answers, so these are asked once per connection but not waited for.
-const SLOTS: [&str; 4] = ["TX1", "TX2", "TX3", "TX4"];
+/// Asked once per connection but not waited for: transmitter slots, custom EQ presets, protocol version, and BT
+/// (which answers only a read-once, not a subscribe).
+const EXTRAS: [&str; 16] = [
+    "TX1", "TX2", "TX3", "TX4", "Ver", "CG1", "CG2", "CG3", "CG4", "CG5", "CM1", "CM2", "CM3",
+    "CM4", "CM5", "BT",
+];
 
 #[derive(Default)]
 struct State {
@@ -66,8 +73,10 @@ struct State {
     on: bool,
     device: Option<String>,
     keys: Keys,
-    /// The game/chat mix kept by the daemon (see mix::Wheel); None until the wheel has reported.
+    /// The game/chat wheel's value (see mix::Wheel); None until the wheel has reported.
     mix: Option<u8>,
+    /// Loudness boost: the stored playback level before the EQ (RACE 0x000A), in dB.
+    loudness: Option<f32>,
 }
 
 impl State {
@@ -83,6 +92,8 @@ impl State {
             "details": if self.on {
                 let mut d = decode::details(k);
                 d["chat_mix"] = json!(self.mix);
+                d["loudness_db"] = json!(self.loudness);
+                d["raw"] = json!(k);
                 d
             } else {
                 Value::Null
@@ -97,6 +108,7 @@ fn main() {
         "watch" => watch(),
         "status" => once(false),
         "raw" => once(true),
+        "set" => set_cli(),
         "config-path" => println!(
             "{}",
             config::path()
@@ -104,11 +116,12 @@ fn main() {
                 .unwrap_or_default()
         ),
         "-h" | "--help" | "help" => println!(
-            "usage: stealthbar [watch|status|raw|config-path]\n  \
-             watch        print a JSON line on every change (default)\n  \
-             status       print the current state once and exit\n  \
-             raw          print every raw key the headset reported, once\n  \
-             config-path  print where the config file is read from"
+            "usage: stealthbar [watch|status|raw|set|config-path]\n  \
+             watch                 print a JSON line on every change (default)\n  \
+             status                print the current state once and exit\n  \
+             raw                   print every raw key the headset reported, once\n  \
+             set <setting> <value> change a headset setting (needs a running `watch`); --list shows them\n  \
+             config-path           print where the config file is read from"
         ),
         other => {
             eprintln!("stealthbar: unknown command {other:?}; try --help");
@@ -120,28 +133,77 @@ fn main() {
 fn watch() {
     let mut out = Emitter::default();
     let cfg = config::load();
+    let listener = match control::listen() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("stealthbar: {e}");
+            std::process::exit(1);
+        }
+    };
     loop {
         match find_device() {
             Some((path, product)) => {
-                if let Err(e) = run(&path, &product, &mut out, &cfg, false) {
+                if let Err(e) = run(&path, &product, &mut out, &cfg, Some(&listener)) {
                     eprintln!("stealthbar: {}: {e}", path.display());
                 }
             }
             None => out.emit(&State::default()),
         }
-        sleep(RESCAN);
+        // keep answering `status` (and refusing `set`) while no dock is plugged in
+        let until = Instant::now() + RESCAN;
+        while Instant::now() < until {
+            control::wait(Some(&listener), until - Instant::now());
+            control::serve(&listener, |cmd| match cmd {
+                control::Cmd::Status => Ok(out
+                    .last
+                    .clone()
+                    .unwrap_or_else(|| State::default().to_json())
+                    .to_string()),
+                control::Cmd::Raw => Ok("{}".into()),
+                control::Cmd::Set(..) => Err("no Stealth Pro II dock found".into()),
+            });
+        }
+    }
+}
+
+/// `stealthbar set <setting> <value…>`: sent to the running `watch` over its control socket.
+fn set_cli() {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    if args.is_empty() || args[0] == "--list" {
+        for (name, values, what) in settings::TABLE {
+            println!("{name:<20} {values:<44} {what}");
+        }
+        return;
+    }
+    match control::request(&format!("set {}", args.join(" "))) {
+        Ok(reply) if reply == "ok" => {}
+        Ok(reply) => {
+            eprintln!("stealthbar: {}", reply.trim_start_matches("error: "));
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "stealthbar: no running `stealthbar watch` ({e}); settings are changed through it"
+            );
+            std::process::exit(1);
+        }
     }
 }
 
 /// `status` / `raw`: read everything once and print it. Never writes to the headset (no chat mix).
 fn once(raw: bool) {
+    // a running daemon is the dock's reader: ask it instead of becoming a second one
+    if let Ok(reply) = control::request(if raw { "raw" } else { "status" }) {
+        println!("{reply}");
+        return;
+    }
     let mut out = Emitter {
         quiet: true,
         ..Emitter::default()
     };
     let cfg = config::Config::default();
     if let Some((path, product)) = find_device()
-        && let Err(e) = run(&path, &product, &mut out, &cfg, true)
+        && let Err(e) = run(&path, &product, &mut out, &cfg, None)
     {
         eprintln!("stealthbar: {}: {e}", path.display());
     }
@@ -260,13 +322,15 @@ impl Hid {
     }
 }
 
+/// `listener`: the control socket in `watch` mode; None for a one-shot `status`/`raw`, which returns once read.
 fn run(
     path: &Path,
     product: &str,
     out: &mut Emitter,
     cfg: &config::Config,
-    once: bool,
+    listener: Option<&UnixListener>,
 ) -> io::Result<()> {
+    let once = listener.is_none();
     let mut hid = Hid::open(path)?;
     let mut reasm = Reassembler::default();
     // Empty the dock's queue first: bytes a previous reader left unread fill it, and replies to our first
@@ -327,12 +391,17 @@ fn run(
                     .collect()
             };
             if state.on && !slots_asked {
-                asked.extend(SLOTS);
+                asked.extend(EXTRAS);
                 slots_asked = true;
+                outbox.push_back(race::dsp(1, race::DSP_INPUT_LEVEL, 0.0));
             }
             for record in &asked {
                 token = token.wrapping_add(1);
-                outbox.push_back(race::subscribe(record, token));
+                outbox.push_back(if *record == "BT" {
+                    race::read_once(record, token)
+                } else {
+                    race::subscribe(record, token)
+                });
             }
             asked_at = Some(now);
             answered.clear();
@@ -398,15 +467,49 @@ fn run(
                         }
                     }
                 }
+                race::CMD_DSP if packet.kind == 0x5b => {
+                    awaiting = None;
+                    if let Some(db) = race::dsp_level(&packet.payload, race::DSP_INPUT_LEVEL) {
+                        state.loudness = Some(db);
+                    }
+                }
                 _ => {}
             }
+        }
+
+        // `stealthbar set` / `status` from the control socket
+        if let Some(l) = listener {
+            control::serve(l, |cmd| match cmd {
+                control::Cmd::Status => Ok(state.to_json().to_string()),
+                control::Cmd::Raw => Ok(json!(state.keys).to_string()),
+                control::Cmd::Set(name, args) => {
+                    if !state.on {
+                        return Err("the headset is off".into());
+                    }
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    for write in settings::parse(&name, &args, &state.keys)? {
+                        token = token.wrapping_add(1);
+                        match write {
+                            settings::Write::Kvp(key, value) => {
+                                outbox.push_back(race::set_kvp(&key, &value, token))
+                            }
+                            settings::Write::Loudness(db) => {
+                                outbox.push_back(race::dsp(0, race::DSP_INPUT_LEVEL, db));
+                                // read it back: the set's reply carries no value
+                                outbox.push_back(race::dsp(1, race::DSP_INPUT_LEVEL, 0.0));
+                            }
+                        }
+                    }
+                    Ok("ok".into())
+                }
+            });
         }
 
         let have_all = RECORDS.iter().all(|r| seen.contains(*r));
         if let Some(at) = asked_at {
             let done = asked
                 .iter()
-                .filter(|r| !r.starts_with("TX"))
+                .filter(|r| RECORDS.contains(r))
                 .all(|r| answered.contains(*r));
             if done {
                 asked_at = None;
@@ -478,12 +581,14 @@ fn run(
             || asked_at.is_some()
             || Instant::now() < busy_until
             || report.get(1).is_some_and(|&n| n > 0);
-        sleep(if busy {
+        let pause = if busy {
             BUSY_POLL
         } else if state.on {
             IDLE_POLL_ON
         } else {
             IDLE_POLL_OFF
-        });
+        };
+        // wakes early for a `set`, so changes from the panel/CLI go out at once
+        control::wait(listener, pause);
     }
 }

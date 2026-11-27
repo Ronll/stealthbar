@@ -1,6 +1,6 @@
 id = "ronll/stealthbar"
 name = "Stealth Pro II"
-version = "0.2.6"
+version = "0.3.0"
 plugin_api = 43
 author = "Ronll"
 license = "MIT"
@@ -39,8 +39,8 @@ entry = "widget.luau"
 [[panel]]
 id = "panel"
 entry = "panel.luau"
-width = 340
-height = 560
+width = 380
+height = 680
 placement = "attached"
 position = "auto"
 open_near_click = true

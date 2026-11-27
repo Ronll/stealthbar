@@ -40,53 +40,90 @@ pub fn mic_muted(keys: &Keys) -> bool {
     .unwrap_or(false)
 }
 
-fn wheel_job(v: Option<i64>) -> Option<&'static str> {
-    Some(match v? {
-        1 => "mic monitoring",
-        2 => "game/chat mix",
-        3 => "bass boost",
-        4 => "treble boost",
-        5 => "noise gate",
-        _ => return None,
-    })
+use crate::settings::{AUTO_OFF, BUTTON_JOBS, GAME_PRESETS, MIC_PRESETS, SHH_MODES, WHEEL_JOBS};
+
+/// A raw value as the matching `stealthbar set` word (so the panel and CLI share one vocabulary).
+fn word(options: &[&'static str], index: Option<i64>) -> Option<&'static str> {
+    options.get(usize::try_from(index?).ok()?).copied()
 }
 
-fn button_job(v: Option<i64>) -> Option<&'static str> {
-    Some(match v? {
-        0 => "noise cancellation",
-        1 => "next game preset",
-        2 => "noise gate",
-        _ => return None,
-    })
+/// Custom preset names, slots 1-5 (records CG1-CG5 at 1700, 1720, … or CM1-CM5 at 1800, …).
+fn custom_names(keys: &Keys, base: u32) -> Vec<Option<String>> {
+    (0..5)
+        .map(|i| {
+            let name = keys.get(&format!("{:x}", base + i * 0x20))?["name"].as_str()?;
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect()
 }
 
-fn preset(keys: &Keys, id_key: &str, name_key: &str) -> Option<String> {
-    match num(keys, id_key)? {
-        0 => Some("custom (unsaved)".into()),
-        _ => text(keys, name_key).filter(|n| !n.is_empty()),
-    }
+/// One EQ bank: preset as a `set` word, its display name, and the 10 bands in dB.
+fn eq(keys: &Keys, base: u32, presets: &[&'static str], customs: &[Option<String>]) -> Value {
+    let id = num(keys, &format!("{:x}", base + 0x10));
+    let preset = match id {
+        Some(0) => Some("custom (unsaved)".to_owned()),
+        Some(n @ 1..=4) => word(presets, Some(n - 1)).map(str::to_owned),
+        Some(n @ 16..=20) => Some(format!("custom{}", n - 15)),
+        _ => None,
+    };
+    let name = text(keys, &format!("{:x}", base + 0xc0))
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            id.filter(|n| (16..=20).contains(n))
+                .and_then(|n| customs.get((n - 16) as usize).cloned().flatten())
+        });
+    let bands: Vec<Option<f64>> = (0..10)
+        .map(|i| num(keys, &format!("{:x}", base + 0x20 + i * 0x10)).map(|t| t as f64 / 10.0))
+        .collect();
+    json!({ "preset": preset, "name": name, "bands": bands })
 }
 
 /// The paired transmitter the headset has selected (`info[0]` = 2) among TX1..TX4 (keys 400/420/440/460).
 fn transmitter(keys: &Keys) -> Option<Value> {
     ["400", "420", "440", "460"].iter().find_map(|k| {
-        let info = keys.get(*k)?["info"].as_array()?;
+        let slot = keys.get(*k)?;
+        let info = slot["info"].as_array()?;
         let s = |i: usize| info.get(i).and_then(Value::as_str);
+        let control = |i: usize| {
+            slot["control"]
+                .get(i)
+                .and_then(Value::as_str)
+                .and_then(|v| v.parse::<i64>().ok())
+        };
         (s(0) == Some("2")).then(|| {
-            let spare = s(3).and_then(|v| v.parse::<i64>().ok()).filter(|v| (1..=100).contains(v));
-            json!({ "product": s(6).map(str::to_lowercase), "firmware": s(7), "spare_battery": spare })
+            // 255 while the slot is empty after a battery went in or out; 0 when it was empty at power-on
+            let spare = s(3)
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|v| (1..=100).contains(v));
+            json!({
+                "product": s(6).map(str::to_lowercase),
+                "firmware": s(7),
+                "spare_battery": spare,
+                "ring_light": control(1),
+                "slot_light": control(2),
+            })
         })
     })
 }
 
 pub fn details(keys: &Keys) -> Value {
+    // 0x290: bit 0 Bluetooth connected, bits 1-2 attachment (1 = 2.4 GHz, 2 = USB cable) (Neap, measured)
+    let link = num(keys, "290");
+    // 0x320 is pushed as a signed level in dBm; a read answers an unrelated positive number
+    let bt_signal = num(keys, "320").filter(|v| *v < 0);
     json!({
         "headset": {
             "product": text(keys, "110").map(|p| p.to_lowercase()),
             "firmware": text(keys, "130"),
             "name": text(keys, "220"),
+            "protocol": text(keys, "0"),
         },
         "transmitter": transmitter(keys),
+        "connection": {
+            "via": link.and_then(|l| match (l >> 1) & 3 { 1 => Some("wireless"), 2 => Some("usb"), _ => None }),
+            "bluetooth": link.map(|l| l & 1 == 1),
+            "bluetooth_signal_dbm": bt_signal,
+        },
         "volume": num(keys, "2a0"),
         "mic": {
             "source": match num(keys, "640") { Some(1) => Some("boom"), Some(2) => Some("built-in"), _ => None },
@@ -99,15 +136,32 @@ pub fn details(keys: &Keys) -> Value {
         "anc": { "on": flag(keys, "750"), "level": num(keys, "760") },
         "superhuman_hearing": {
             "on": flag(keys, "720"),
-            "mode": match num(keys, "730") { Some(0) => Some("legacy"), Some(1) => Some("footsteps"), Some(2) => Some("gunshots"), _ => None },
+            "mode": word(&SHH_MODES, num(keys, "730")),
             "level": num(keys, "740"),
         },
-        "eq": { "game": preset(keys, "1210", "12c0"), "mic": preset(keys, "1310", "13c0") },
-        "controls": { "wheel": wheel_job(num(keys, "a20")), "button": button_job(num(keys, "b20")) },
+        "eq": {
+            "game": eq(keys, 0x1200, &GAME_PRESETS, &custom_names(keys, 0x1700)),
+            "mic": eq(keys, 0x1300, &MIC_PRESETS, &custom_names(keys, 0x1800)),
+            "custom_game": custom_names(keys, 0x1700),
+            "custom_mic": custom_names(keys, 0x1800),
+        },
+        "controls": {
+            "wheel": {
+                "pc": word(&WHEEL_JOBS, num(keys, "a20").map(|v| v - 1)),
+                "playstation": word(&WHEEL_JOBS, num(keys, "a00").map(|v| v - 1)),
+                "xbox": word(&WHEEL_JOBS, num(keys, "a10").map(|v| v - 1)),
+            },
+            "button": {
+                "pc": word(&BUTTON_JOBS, num(keys, "b20")),
+                "playstation": word(&BUTTON_JOBS, num(keys, "b00")),
+                "xbox": word(&BUTTON_JOBS, num(keys, "b10")),
+            },
+        },
         "power": {
-            "auto_off_minutes": match num(keys, "280") { Some(0) => Some(0), Some(1) => Some(5), Some(2) => Some(10), Some(3) => Some(20), Some(4) => Some(30), _ => None },
+            "auto_off": word(&AUTO_OFF, num(keys, "280")),
             "wake_on_motion": flag(keys, "2e0"),
         },
+        "prompts": num(keys, "2d0"),
     })
 }
 
@@ -137,5 +191,33 @@ mod tests {
         let d = details(&k);
         assert_eq!(d["transmitter"]["product"], "2283");
         assert_eq!(d["transmitter"]["spare_battery"], 100);
+    }
+
+    #[test]
+    fn decodes_eq_controls_and_link() {
+        let mut k = keys(&[
+            ("1210", "17"),
+            ("1220", "-25"),
+            ("12c0", ""),
+            ("a20", "2"),
+            ("b10", "1"),
+            ("280", "0"),
+            ("290", "3"),
+            ("320", "-55"),
+            ("730", "1"),
+        ]);
+        k.insert("1720".into(), json!({"name": "De Mud", "bands": []}));
+        let d = details(&k);
+        assert_eq!(d["eq"]["game"]["preset"], "custom2");
+        assert_eq!(d["eq"]["game"]["name"], "De Mud");
+        assert_eq!(d["eq"]["game"]["bands"][0], -2.5);
+        assert_eq!(d["eq"]["custom_game"][1], "De Mud");
+        assert_eq!(d["controls"]["wheel"]["pc"], "chat");
+        assert_eq!(d["controls"]["button"]["xbox"], "preset");
+        assert_eq!(d["power"]["auto_off"], "never");
+        assert_eq!(d["connection"]["via"], "wireless");
+        assert_eq!(d["connection"]["bluetooth"], true);
+        assert_eq!(d["connection"]["bluetooth_signal_dbm"], -55);
+        assert_eq!(d["superhuman_hearing"]["mode"], "footsteps");
     }
 }

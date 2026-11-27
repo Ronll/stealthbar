@@ -2,8 +2,10 @@
 
 Status-bar indicator for the **Turtle Beach Stealth Pro II** wireless headset on Linux: battery, charging and
 mic mute in a capsule that is shown **only while the headset is on**, a panel with everything the headset
-reports (ANC, Superhuman Hearing, EQ presets, mic settings, dock spare battery, firmware, …), and optionally the
-headset's **game/chat wheel driving the volume of Discord** (or any chat app) in PipeWire.
+reports **and a control for every setting it accepts** (noise cancellation, Superhuman Hearing, game and mic EQ,
+mic monitoring and noise gate, wheel and button jobs, auto off, dock lights, loudness boost, …), a `stealthbar set`
+CLI for the same settings, and optionally the headset's **game/chat wheel driving the volume of Discord** (or any
+chat app) in PipeWire.
 
 Two parts:
 
@@ -20,8 +22,8 @@ without reading the code first.
 ## What it was built for
 
 Turtle Beach ships no Linux software for this headset. Its Windows app (Swarm II) shows battery and settings by
-talking to the dock over a vendor HID channel. `stealthbar` reads the same channel so a Linux desktop can show the
-headset's state and hide the indicator when the headset is off. On PC the headset receives a single stereo
+talking to the dock over a vendor HID channel. `stealthbar` speaks the same channel so a Linux desktop can show
+the headset's state, hide the indicator when the headset is off, and change the headset's settings. On PC the headset receives a single stereo
 stream, so its game/chat wheel can't mix anything by itself; `stealthbar` can apply the wheel to app volumes.
 
 It does **not** control the master volume: that is the standard USB Audio Class volume, which PipeWire/PulseAudio
@@ -133,14 +135,58 @@ What the UI shows:
 - **Bar capsule:** hidden while `on` is false. Otherwise a big headphones glyph and, stacked beside it, the mic
   state (`microphone`, or a red `microphone-off` while muted) above the battery percent (with a bolt while
   charging; red at or below `low_battery` unless charging), plus a tooltip (battery, charging, mic).
-- **Panel** (click the capsule, or `noctalia msg panel-toggle ronll/stealthbar:panel`): battery (headset, charging,
-  spare battery in the dock), microphone (boom/built-in, muted, sensitivity, monitoring, AI noise reduction, noise
-  gate), sound (volume, chat wheel, noise cancellation, Superhuman Hearing, game and mic EQ presets), controls
-  (lower wheel and mode button jobs, auto off, wake on motion), device (name, headset and transmitter product ids
-  and firmware). Read-only; it closes when you click outside it.
+- **Panel** (click the capsule, or `noctalia msg panel-toggle ronll/stealthbar:panel`; closes when you click
+  outside it), top to bottom: battery (headset, headset charging, spare in the dock, "charging" while below 100 %);
+  sound (system volume, chat wheel, noise cancellation on/off and ambient↔ANC level, Superhuman Hearing on/off,
+  mode and level, loudness boost); game EQ (preset incl. named custom presets, 10 band sliders); microphone (boom or
+  built-in, boom arm state, built-in mute, sensitivity, monitoring, AI noise reduction, noise gate on/off and
+  level); mic EQ (preset, 10 bands); controls (lower wheel and mode button jobs for PC, PlayStation and Xbox);
+  power and lights (auto off, wake on motion, voice prompt volume, dock status light and battery slot light);
+  device (name, headset and transmitter ids and firmware, 2.4 GHz or USB, Bluetooth and its signal, protocol
+  version); raw values (every key the headset reported, sorted). Toggles and dropdowns apply at once, sliders on
+  release; each control shows what the headset reports back, so a change the headset refuses springs back.
 
-Only the service runs the daemon. Don't run a second `stealthbar watch` (or Neap, or swarm2linux) at the same time:
-every reader takes replies off the same dock queue, so each would miss some.
+Only the service runs the daemon. Don't run a second reader (Neap, swarm2linux) at the same time: every reader
+takes replies off the same dock queue, so each would miss some. A second `stealthbar watch` refuses to start, and
+`stealthbar status` / `raw` / `set` talk to the running one instead of reading the dock themselves.
+
+## Changing settings: `stealthbar set`
+
+`stealthbar set <setting> <value…>` sends one change to the running `stealthbar watch` (the Noctalia service's
+daemon) over its control socket, `$XDG_RUNTIME_DIR/stealthbar.sock` (or `/tmp/stealthbar-<uid>.sock`; mode 0600).
+It prints nothing and exits 0 when the daemon queued the write, or prints the reason and exits 1 (headset off,
+bad value, no daemon running). The headset confirms by pushing the new value, visible in `stealthbar status` and
+the panel within a second. `stealthbar set --list` prints this table:
+
+| Setting | Values | Key / what |
+|---|---|---|
+| `anc` | `on` / `off` | active noise cancellation (`750`) |
+| `anc-level` | 0–100 | 0 = ambient/transparency … 100 = full ANC (`760`) |
+| `shh` | `on` / `off` | Superhuman Hearing (`720`) |
+| `shh-mode` | `legacy` / `footsteps` / `gunshots` | (`730`) |
+| `shh-level` | 0–100 | (`740`) |
+| `gate` | `on` / `off` | mic noise gate (`700`) |
+| `gate-level` | 0–100 | (`710`) |
+| `monitoring` | 0–100 | hear your own voice / sidetone (`620`) |
+| `noise-reduction` | `on` / `off` | AI noise reduction of the mic (`630`) |
+| `sensitivity` | 0–100 | mic sensitivity (`610`); it follows the system mic input level, so usually set that instead |
+| `mic-mute` | `on` / `off` | built-in mics' mute (`650`); refused while the boom mic is in use (its arm is the mute) |
+| `eq` | `signature` / `bass` / `bass-treble` / `vocal` / `custom1`–`custom5` | game EQ preset (`1210`) |
+| `eq-band` | `<1-10> <dB -9..9>` | game EQ band at 32, 63, 125, 250, 500 Hz, 1, 2, 4, 8, 16 kHz, steps of 0.5 dB (`1220`–`12b0`); the preset becomes "custom (unsaved)" |
+| `mic-eq` | `signature` / `full` / `clarity` / `smooth` / `custom1`–`custom5` | mic EQ preset (`1310`) |
+| `mic-eq-band` | `<1-10> <dB -9..9>` | mic EQ band at 100, 160, 250, 400, 630 Hz, 1, 1.6, 2.5, 4, 6.3 kHz (`1320`–`13b0`) |
+| `wheel`, `wheel-playstation`, `wheel-xbox` | `monitoring` / `chat` / `bass` / `treble` / `gate` | lower left wheel's job per platform (`a20`, `a00`, `a10`) |
+| `button`, `button-playstation`, `button-xbox` | `anc` / `preset` / `gate` | mode button's job per platform (`b20`, `b00`, `b10`) |
+| `auto-off` | `never` / `5` / `10` / `20` / `30` | minutes (`280`) |
+| `wake-on-motion` | `on` / `off` | (`2e0`) |
+| `prompts` | 0–100 | voice prompt volume (`2d0`) |
+| `ring-light`, `slot-light` | 0–100 | the selected transmitter's status light and (charging dock) battery-slot light (slot key + 1 / + 2, e.g. `401`/`402`) |
+| `loudness` | dB −24…6 | playback level before the EQ, **stored on the headset**; factory −12; +6 is clearly louder, but boosting with EQ or Superhuman Hearing on top can clip (RACE `0x000A`, not a key) |
+
+Every setting except `loudness` is stored on the headset too, as with Turtle Beach's app. Not offered: saving or
+deleting custom EQ presets (the app writes names longer than one report in a way not captured yet), the master
+volume (that is the system volume), the wheel position (read-only), and firmware updates. Examples for key
+bindings: `stealthbar set anc on`, `stealthbar set eq bass`, `stealthbar set shh-mode footsteps`.
 
 ### Other bars
 
@@ -206,30 +252,36 @@ Every line is a complete JSON object (no partial updates); a new line is printed
 | `device` | string or null | USB product id of the dock/transmitter in use, e.g. `"2283"` |
 | `details` | object or null | everything else, decoded; null while `on` is false. Every leaf can be null (not reported yet) |
 
-`details`:
+`details` (every leaf can be null until reported; values of settings use the same words as `stealthbar set`):
 
 | Path | Meaning (raw key) |
 |---|---|
-| `headset.product`, `.firmware`, `.name` | headset USB id (`110`), firmware (`130`), name set in Swarm II (`220`) |
-| `transmitter.product`, `.firmware`, `.spare_battery` | the transmitter the headset uses (slot records `400`–`460`); spare battery % in a charging dock |
+| `headset.product`, `.firmware`, `.name`, `.protocol` | headset USB id (`110`), firmware (`130`), name set in Swarm II (`220`), protocol version (`Ver` `0`) |
+| `transmitter.product`, `.firmware`, `.spare_battery`, `.ring_light`, `.slot_light` | the transmitter the headset uses (slot records `400`–`460`): ids, spare battery % in a charging dock (it charges whatever is in its slot), light brightnesses |
+| `connection.via`, `.bluetooth`, `.bluetooth_signal_dbm` | `"wireless"` (2.4 GHz) or `"usb"` (cable) and Bluetooth connected (`290`: bit 0 Bluetooth, bits 1–2 attachment); Bluetooth signal in dBm (`320` pushes) |
 | `volume` | master volume 0–100 as the headset sees it (`2a0`; mirrors the system volume, read-only) |
-| `chat_mix` | game/chat wheel 0–100 as last pushed (`510`; see the config section); null until the wheel moved |
+| `chat_mix` | game/chat wheel 0–100 as last pushed (`510`); null until the wheel moved |
+| `loudness_db` | the stored playback level before the EQ (RACE `0x000A`), factory −12 |
 | `mic.source` | `"boom"` or `"built-in"` (`640`) |
-| `mic.muted`, `.sensitivity`, `.monitoring`, `.noise_reduction` | mute (`600`/`650`), sensitivity % (`610`, follows the system mic level), sidetone % (`620`), AI noise reduction (`630`) |
+| `mic.muted`, `.sensitivity`, `.monitoring`, `.noise_reduction` | mute (`600` boom arm / `650` built-in), sensitivity % (`610`), sidetone % (`620`), AI noise reduction (`630`) |
 | `noise_gate.on`, `.level` | `700`, `710` |
-| `anc.on`, `.level` | active noise cancellation (`750`); level 0 = ambient/transparency … 100 = full (`760`) |
+| `anc.on`, `.level` | active noise cancellation (`750`); 0 = ambient/transparency … 100 = full (`760`) |
 | `superhuman_hearing.on`, `.mode`, `.level` | `720`; `legacy`/`footsteps`/`gunshots` (`730`); `740` |
-| `eq.game`, `eq.mic` | preset names (`1210`/`12c0`, `1310`/`13c0`); `"custom (unsaved)"` for edited bands |
-| `controls.wheel`, `.button` | PC platform jobs of the lower left wheel (`a20`) and the mode button (`b20`) |
-| `power.auto_off_minutes`, `.wake_on_motion` | 0 = never, 5, 10, 20, 30 (`280`); `2e0` |
+| `eq.game`, `eq.mic` | `{preset, name, bands}`: preset as a `set` word (`1210`/`1310`; `"custom (unsaved)"` after a band edit), its display name (`12c0`/`13c0` or the custom slot's name), 10 bands in dB (`1220`–`12b0`, `1320`–`13b0`, tenths of a dB) |
+| `eq.custom_game`, `eq.custom_mic` | names of custom presets 1–5 (records `CG1`–`CG5` at `1700`…, `CM1`–`CM5` at `1800`…), null for empty slots |
+| `controls.wheel.{pc,playstation,xbox}`, `controls.button.{…}` | jobs of the lower left wheel (`a20`/`a00`/`a10`) and the mode button (`b20`/`b00`/`b10`) |
+| `power.auto_off`, `.wake_on_motion` | `never`/`5`/`10`/`20`/`30` (`280`); `2e0` |
+| `prompts` | voice prompt volume (`2d0`) |
+| `raw` | every key the headset reported, as it reported it (also `stealthbar raw`); undecoded keys included |
 
 Commands:
 
 | Command | What |
 |---|---|
 | `stealthbar watch` | (default) stream a line per change; reconnects on its own; never exits |
-| `stealthbar status` | print the state once (about 2 s) and exit; never writes to the headset |
-| `stealthbar raw` | print every raw key the headset reported, once, as one JSON object; for finding new keys |
+| `stealthbar status` | print the state once and exit: from the running `watch` if there is one, else by reading the dock (about 2 s); never writes |
+| `stealthbar raw` | every raw key the headset reported, once, as one JSON object; for finding new keys |
+| `stealthbar set <setting> <value…>` | change a setting through the running `watch` (see above); `--list` prints the settings |
 | `stealthbar config-path` | print where the config file is read from |
 
 Errors go to stderr; the exit code is 0 unless the command line is wrong.
@@ -245,14 +297,23 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
   **one at a time** (next one after the reply, or after 600 ms): sending them back to back overflows the dock's
   reply queue and loses records.
 - **Protocol:** Airoha RACE packets (`05 <type> <len u16 LE> <cmd u16 LE> <payload>`). Turtle Beach's settings
-  protocol rides in RACE command `0x9902`. The daemon subscribes (`S` + name) to the records `GSI Inf Mic SAF 3DT
-  Enc Btn AQG AQM TX1..TX4`; the headset answers `{"OR":"GSI","KVP":{...}}` and afterwards pushes changes as
-  `{"UP":...}`. Writes are `set_kvp {"0x500":"1"}` (only for the chat mix).
+  protocol rides in RACE command `0x9902`. The headset lists its records with an `index` request: `Ver Inf GSI BT
+  TX1-TX4 3DT Mic SAF Enc Btn AQG AQM CEC CG1-CG5 CM1-CM5` (no others answer). Once per connection the daemon
+  subscribes (`S` + name) to all of them but `CEC` (undecoded) and reads `BT` once (`R` + name; it doesn't answer a
+  subscribe); the headset answers `{"OR":"GSI","KVP":{...}}` and afterwards pushes changes as `{"UP":...}`. Writes
+  are `set_kvp {"0x<key>":"<value>"}` with an ack. The loudness level is RACE `0x000A` (payload: op u16 BE 0 set /
+  1 read, parameter `0x00040000` u32 BE, value f32 BE in dB), sent with the relay bit (`0x80` in byte 2) so the dock
+  passes it to the headset.
 - **On/off:** the dock sends RACE `0x2cb1` when the wireless link changes (payload byte 2: 1 up, 0 down). The headset
   drops subscriptions when it restarts, so the daemon subscribes again 1.5 s after link-up. No GSI answer within 3 s
   means off; while off it asks again every 10 s, while on every 60 s as a heartbeat.
-- **Safety:** it never sends RACE storage (`0x04xx`) or firmware (`0x1Cxx`) commands. Without a config file it
-  only reads.
+- **Safety:** only the keys and values in the `set` table (which Turtle Beach's app or Neap write) are ever
+  written, plus `0x500`/`0xa20` for the chat mix; never a transmitter slot's base key (Neap saw that unpair the
+  headset), RACE storage (`0x04xx`) or firmware (`0x1Cxx`) commands. Without `set` calls and the chat mix it only
+  reads.
+- **Control socket:** `watch` listens on `$XDG_RUNTIME_DIR/stealthbar.sock` and waits on it (`poll`) instead of
+  sleeping between polls of the dock, so a `set` goes out at once. One line in (`status`, `raw`, `set <setting>
+  <value…>`), one line out (JSON, `ok`, or `error: …`).
 
 ## Lifecycle and resource use
 
@@ -297,6 +358,9 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
 | some panel rows stay `—` | that record hasn't been answered yet; `stealthbar raw` shows which keys arrived |
 | chat mix does nothing | config not loaded (`stealthbar config-path`, restart the service), the wheel hasn't moved yet, or the chat app's stream doesn't match `apps` (check `pw-dump` for its `application.name`) |
 | `battery` stays null | headset just had its battery swapped (reports 255); wait for a push |
+| `stealthbar set` says "no running `stealthbar watch`" | the Noctalia service (or your own `watch`) isn't running; settings only go through it |
+| `watch` exits with "another `stealthbar watch` is running" | one daemon per user; stop the other one (or use its socket via `status`/`set`) |
+| a panel control springs back | the headset refused the value (e.g. built-in mic mute while the boom is in use); see the `set` table |
 
 Debug by hand: stop the Noctalia service's daemon first (only one reader: a second reader takes replies off the
 same queue and makes both flaky), then `stealthbar watch` in a terminal while switching the headset on/off,
@@ -309,14 +373,16 @@ per-process session byte), so replies to someone else's requests stand out.
 | Path | What |
 |---|---|
 | `src/main.rs` | CLI, device discovery, hidraw I/O (write, `HIDIOCGINPUT` poll), request queue, state machine, JSON output |
-| `src/race.rs` | report framing, RACE packet reassembly, request builders (`subscribe`, `set_kvp`), JSON extraction; tests |
+| `src/control.rs` | the control socket: `set`/`status`/`raw` from clients to the running `watch` |
+| `src/settings.rs` | the `set` table: setting names → keys, value checks; the place to add a writable setting |
+| `src/race.rs` | report framing, RACE packet reassembly, request builders (`subscribe`, `read_once`, `set_kvp`, `dsp`), JSON extraction; tests |
 | `src/decode.rs` | raw keys → `battery`, `mic_muted`, `details`; the place to add a decoded field |
 | `src/config.rs` | config file location and schema |
 | `src/mix.rs` | game/chat mix curve and PipeWire stream volumes (`pw-dump`, `wpctl`) |
 | `plugin/plugin.toml` | Noctalia manifest: id `ronll/stealthbar`, service, widget, panel, settings |
-| `plugin/service.luau` | runs `stealthbar watch` once, publishes each line as state `stealthbar.status` |
+| `plugin/service.luau` | runs `stealthbar watch` once, publishes each line as state `stealthbar.status`; runs `stealthbar set` for the panel |
 | `plugin/widget.luau` | bar capsule from `stealthbar.status`; click toggles the panel |
-| `plugin/panel.luau` | the panel (read-only rows from `details`) |
+| `plugin/panel.luau` | the panel: rows and controls from `details`; changes go to the service as `stealthbar.set` |
 | `plugin/translations/en.json` | setting labels |
 | `70-stealthbar.rules` | udev rule (uaccess for vendor `10f5` hidraw) |
 | `flake.nix` | optional: Nix package (binary + rule + plugin) and dev shell |
@@ -324,7 +390,9 @@ per-process session byte), so replies to someone else's requests stand out.
 Develop: `cargo test`, `cargo clippy --all-targets`, `cargo fmt`; with Nix, `nix develop` gives the toolchain.
 Check the plugin with `noctalia plugins lint plugin`. To add a field: find its key with `stealthbar raw` (and the
 references below), decode it in `src/decode.rs`, document it in the tables above, and show it in
-`plugin/panel.luau`. New writes must be ones Turtle Beach's app or Neap are known to send.
+`plugin/panel.luau`. To add a writable setting: add it to `TABLE` and `parse` in `src/settings.rs` (with a test),
+to the `set` table in this README, and a control in `plugin/panel.luau`. New writes must be ones Turtle Beach's app
+or Neap are known to send.
 
 ## Credits and protocol references
 
