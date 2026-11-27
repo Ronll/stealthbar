@@ -1,8 +1,12 @@
 //! stealthbar: prints the state of a Turtle Beach Stealth Pro II headset as one JSON line per change.
-//! See README.md for the protocol, the output format and how the Noctalia widget uses it.
+//! See README.md for the protocol, the output format, the config file and how the Noctalia plugin uses it.
 
+mod config;
+mod decode;
+mod mix;
 mod race;
 
+use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -11,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use decode::Keys;
 use race::{CMD_KVP, CMD_LINK, REPORT_IN, REPORT_LEN, Reassembler};
 use serde_json::{Value, json};
 
@@ -18,10 +23,15 @@ const VENDOR: &str = "000010F5";
 /// The vendor collection in the report descriptor: Usage Page 0xFF13.
 const VENDOR_PAGE: [u8; 3] = [0x06, 0x13, 0xff];
 
-/// How often an idle device is polled; the dock keeps unread bytes queued, so a slow poll loses nothing.
-const IDLE_POLL: Duration = Duration::from_millis(250);
+/// How often an idle dock is polled. It keeps unread bytes queued, so a slow poll loses nothing; it only
+/// delays how soon a change shows. Slower while the headset is off: only a link-up can arrive then.
+const IDLE_POLL_ON: Duration = Duration::from_millis(500);
+const IDLE_POLL_OFF: Duration = Duration::from_secs(2);
 /// Polling right after an ask, while a reply arrives over several reports.
-const BUSY_POLL: Duration = Duration::from_millis(20);
+const BUSY_POLL: Duration = Duration::from_millis(15);
+/// Requests go out one at a time: the next only after the reply (or this long without one; an empty
+/// transmitter slot never answers). Pipelining them overflows the dock's reply queue and loses records.
+const REPLY_WAIT: Duration = Duration::from_millis(600);
 const BUSY_FOR: Duration = Duration::from_secs(2);
 /// No answer to an ask within this time means the headset is off (or the dock is stuck).
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
@@ -32,31 +42,36 @@ const RETRY_OFF: Duration = Duration::from_secs(10);
 /// The headset drops subscriptions when it restarts; subscribe again this long after it links up.
 const RESUBSCRIBE_AFTER_LINK: Duration = Duration::from_millis(1500);
 const RESCAN: Duration = Duration::from_secs(2);
+/// Re-apply the chat mix this often, for chat streams that appeared since the wheel last moved.
+const MIX_REFRESH: Duration = Duration::from_secs(5);
 
-/// Records subscribed to: GSI has battery (0x240) and charging (0x250), Mic has mute (0x600).
-const RECORDS: [&str; 2] = ["GSI", "Mic"];
+/// Records the headset answers (each owns a key range: Inf 1xx, GSI 2xx, 3DT 5xx, Mic 6xx, SAF 7xx, Enc axx,
+/// Btn bxx, AQG 12xx, AQM 13xx). GSI answering is what "on" means.
+const RECORDS: [&str; 9] = [
+    "GSI", "Inf", "Mic", "SAF", "3DT", "Enc", "Btn", "AQG", "AQM",
+];
+/// Transmitter slots: an empty slot never answers, so these are asked but not waited for.
+const SLOTS: [&str; 4] = ["TX1", "TX2", "TX3", "TX4"];
 
-#[derive(Clone, PartialEq, Default)]
+#[derive(Default)]
 struct State {
     present: bool,
     on: bool,
-    battery: Option<u8>,
-    charging: bool,
-    mic_muted: bool,
     device: Option<String>,
-    /// Raw mic keys: 0x640 source (1 boom, 2 built-in), 0x600 boom arm up, 0x650 built-in mute.
-    mic: [u16; 3],
+    keys: Keys,
 }
 
 impl State {
     fn to_json(&self) -> Value {
+        let k = &self.keys;
         json!({
             "present": self.present,
             "on": self.on,
-            "battery": self.battery,
-            "charging": self.charging,
-            "mic_muted": self.mic_muted,
+            "battery": decode::battery(k),
+            "charging": decode::charging(k),
+            "mic_muted": decode::mic_muted(k),
             "device": self.device,
+            "details": if self.on { decode::details(k) } else { Value::Null },
         })
     }
 }
@@ -64,10 +79,21 @@ impl State {
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "watch".into());
     match mode.as_str() {
-        "watch" => watch(false),
-        "status" => watch(true),
+        "watch" => watch(),
+        "status" => once(false),
+        "raw" => once(true),
+        "config-path" => println!(
+            "{}",
+            config::path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        ),
         "-h" | "--help" | "help" => println!(
-            "usage: stealthbar [watch|status]\n  watch   print a JSON line on every change (default)\n  status  print the current state once and exit"
+            "usage: stealthbar [watch|status|raw|config-path]\n  \
+             watch        print a JSON line on every change (default)\n  \
+             status       print the current state once and exit\n  \
+             raw          print every raw key the headset reported, once\n  \
+             config-path  print where the config file is read from"
         ),
         other => {
             eprintln!("stealthbar: unknown command {other:?}; try --help");
@@ -76,46 +102,55 @@ fn main() {
     }
 }
 
-fn watch(once: bool) {
-    let mut out = Emitter {
-        quiet: once,
-        ..Emitter::default()
-    };
+fn watch() {
+    let mut out = Emitter::default();
+    let cfg = config::load();
     loop {
         match find_device() {
             Some((path, product)) => {
-                if let Err(e) = run(&path, &product, &mut out, once) {
+                if let Err(e) = run(&path, &product, &mut out, &cfg, false) {
                     eprintln!("stealthbar: {}: {e}", path.display());
                 }
             }
             None => out.emit(&State::default()),
         }
-        if once {
-            out.flush_once();
-            return;
-        }
         sleep(RESCAN);
     }
 }
 
+/// `status` / `raw`: read everything once and print it. Never writes to the headset (no chat mix).
+fn once(raw: bool) {
+    let mut out = Emitter {
+        quiet: true,
+        ..Emitter::default()
+    };
+    let cfg = config::Config::default();
+    if let Some((path, product)) = find_device()
+        && let Err(e) = run(&path, &product, &mut out, &cfg, true)
+    {
+        eprintln!("stealthbar: {}: {e}", path.display());
+    }
+    let last = if raw { out.last_raw } else { out.last };
+    println!("{}", last.unwrap_or_else(|| State::default().to_json()));
+}
+
 #[derive(Default)]
 struct Emitter {
-    last: Option<State>,
-    /// `status` prints only the final state.
+    last: Option<Value>,
+    last_raw: Option<Value>,
+    /// `status`/`raw` print only the final state.
     quiet: bool,
 }
 
 impl Emitter {
     fn emit(&mut self, state: &State) {
-        if self.last.as_ref() != Some(state) && !self.quiet {
-            println!("{}", state.to_json());
+        let value = state.to_json();
+        if self.last.as_ref() != Some(&value) && !self.quiet {
+            println!("{value}");
             let _ = io::stdout().flush();
         }
-        self.last = Some(state.clone());
-    }
-
-    fn flush_once(&mut self) {
-        println!("{}", self.last.clone().unwrap_or_default().to_json());
+        self.last = Some(value);
+        self.last_raw = Some(json!(state.keys));
     }
 }
 
@@ -191,7 +226,13 @@ impl Hid {
     }
 }
 
-fn run(path: &Path, product: &str, out: &mut Emitter, once: bool) -> io::Result<()> {
+fn run(
+    path: &Path,
+    product: &str,
+    out: &mut Emitter,
+    cfg: &config::Config,
+    once: bool,
+) -> io::Result<()> {
     let mut hid = Hid::open(path)?;
     let mut reasm = Reassembler::default();
     let mut state = State {
@@ -202,21 +243,35 @@ fn run(path: &Path, product: &str, out: &mut Emitter, once: bool) -> io::Result<
     out.emit(&state);
 
     let mut token: u8 = 0;
+    let mut outbox: VecDeque<[u8; REPORT_LEN]> = VecDeque::new();
+    let mut awaiting: Option<Instant> = None;
     let mut asked_at: Option<Instant> = None;
-    let mut answered = 0;
+    let mut answered: HashSet<String> = HashSet::new();
     let mut next_ask = Some(Instant::now());
     let mut busy_until = Instant::now();
+    // per connection: the chat-mix writes (enable wheel reports, wheel job) are sent once all records are in
+    let mut mix_setup_done = false;
+    let mut last_mix: Option<u8> = None;
+    let mut mix_applied_at = Instant::now();
+    let chat = &cfg.chat_mix;
 
     loop {
         let now = Instant::now();
         if next_ask.is_some_and(|t| now >= t) {
-            for record in RECORDS {
+            for record in RECORDS.iter().chain(&SLOTS) {
                 token = token.wrapping_add(1);
-                hid.write(&race::subscribe(record, token))?;
+                outbox.push_back(race::subscribe(record, token));
             }
             asked_at = Some(now);
-            answered = 0;
+            answered.clear();
             next_ask = None;
+        }
+        // one request per poll, so the dock's small receive queue never overflows
+        if awaiting.is_none_or(|t| now.duration_since(t) > REPLY_WAIT)
+            && let Some(frame) = outbox.pop_front()
+        {
+            awaiting = Some(now);
+            hid.write(&frame)?;
             busy_until = now + BUSY_FOR;
         }
 
@@ -230,66 +285,92 @@ fn run(path: &Path, product: &str, out: &mut Emitter, once: bool) -> io::Result<
                     } else {
                         state.on = false;
                     }
+                    state.keys.remove("510");
+                    mix_setup_done = false;
                 }
                 CMD_KVP => {
+                    if packet.kind == 0x5b {
+                        awaiting = None;
+                    }
                     for doc in race::documents(&packet.payload) {
-                        if doc.get("OR").is_some() {
-                            answered += 1;
+                        if let Some(record) = doc.get("OR").and_then(Value::as_str) {
+                            answered.insert(record.to_owned());
                         }
-                        state.on = true;
-                        apply(&mut state, &doc["KVP"]);
+                        if let Some(kvp) = doc["KVP"].as_object() {
+                            state.on = true;
+                            // a read answers 0x510 = 0 before the wheel has moved (a real 0 means game
+                            // only): take the wheel position only from pushes, which come when it turns
+                            let pushed = doc.get("UP").is_some();
+                            state.keys.extend(
+                                kvp.iter()
+                                    .filter(|(k, _)| pushed || *k != "510")
+                                    .map(|(k, v)| (k.clone(), v.clone())),
+                            );
+                        }
                     }
                 }
                 _ => {}
             }
         }
 
+        let all_in = RECORDS.iter().all(|r| answered.contains(*r));
         if let Some(at) = asked_at {
-            if answered >= RECORDS.len() {
+            if all_in {
                 asked_at = None;
                 next_ask.get_or_insert(Instant::now() + HEARTBEAT);
             } else if now.duration_since(at) > ANSWER_TIMEOUT {
                 asked_at = None;
                 // nothing at all: the headset is off; a partial answer: it is on, ask again soon
-                state.on = answered > 0;
+                state.on = answered.contains("GSI");
                 next_ask.get_or_insert(Instant::now() + RETRY_OFF);
             }
         }
+        if !state.on {
+            mix_setup_done = false;
+        }
+
+        if chat.enabled && state.on {
+            if !mix_setup_done && all_in {
+                // the headset reports the wheel (0x510) only while 0x500 is set, and clears 0x500 at every connect
+                token = token.wrapping_add(1);
+                outbox.push_back(race::set_kvp("500", "1", token));
+                let wheel = state.keys.get("a20").and_then(Value::as_str);
+                if chat.set_wheel && wheel != Some("2") {
+                    token = token.wrapping_add(1);
+                    outbox.push_back(race::set_kvp("a20", "2", token));
+                }
+                mix_setup_done = true;
+            }
+            let mix = decode::chat_mix(&state.keys);
+            if let Some(m) = mix
+                && (mix != last_mix || now.duration_since(mix_applied_at) > MIX_REFRESH)
+            {
+                mix::apply(chat, m);
+                last_mix = mix;
+                mix_applied_at = Instant::now();
+            }
+        }
+
         out.emit(&state);
-        if once && asked_at.is_none() {
+        if once
+            && asked_at.is_none()
+            && outbox.is_empty()
+            && awaiting.is_none_or(|t| now.duration_since(t) > REPLY_WAIT)
+        {
             return Ok(());
         }
 
-        let busy = asked_at.is_some()
+        let busy = !outbox.is_empty()
+            || awaiting.is_some_and(|t| now.duration_since(t) <= REPLY_WAIT)
+            || asked_at.is_some()
             || Instant::now() < busy_until
             || report.get(1).is_some_and(|&n| n > 0);
-        sleep(if busy { BUSY_POLL } else { IDLE_POLL });
+        sleep(if busy {
+            BUSY_POLL
+        } else if state.on {
+            IDLE_POLL_ON
+        } else {
+            IDLE_POLL_OFF
+        });
     }
-}
-
-/// Take the keys the widget shows from a document's key/value map.
-fn apply(state: &mut State, kvp: &Value) {
-    let number = |key: &str| {
-        kvp.get(key)
-            .and_then(Value::as_str)
-            .and_then(|s| s.parse::<u16>().ok())
-    };
-    if let Some(b) = number("240") {
-        // 255 = not measured yet (battery just swapped)
-        state.battery = (b <= 100).then_some(b as u8);
-    }
-    if let Some(c) = number("250") {
-        state.charging = c != 0;
-    }
-    for (i, key) in ["640", "600", "650"].into_iter().enumerate() {
-        if let Some(v) = number(key) {
-            state.mic[i] = v;
-        }
-    }
-    let [source, boom_up, builtin_muted] = state.mic;
-    state.mic_muted = if source == 2 {
-        builtin_muted != 0
-    } else {
-        boom_up != 0
-    };
 }

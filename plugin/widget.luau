@@ -1,14 +1,10 @@
 --!nonstrict
--- One `stealthbar watch` stream per widget (the host kills it with the widget). Each line is the whole
--- state; the widget is hidden unless the headset is on.
+-- Bar capsule: hidden unless the headset is on; click opens the panel with everything the daemon reports.
 
-local command = noctalia.getConfig("command") or "stealthbar watch"
 local low = tonumber(noctalia.getConfig("low_battery")) or 15
 
-local function apply(line: string)
-  local ok, s = pcall(noctalia.json.decode, line)
-  if not ok or type(s) ~= "table" then return end
-  if not s.on then
+local function render(s)
+  if type(s) ~= "table" or not s.on then
     barWidget.setVisible(false)
     return
   end
@@ -36,7 +32,9 @@ local function apply(line: string)
   barWidget.setVisible(true)
 end
 
-barWidget.setVisible(false)
-if not noctalia.runStream(command, apply) then
-  noctalia.notifyError("Stealth Pro II", `Could not start: {command}`)
+noctalia.state.watch("stealthbar.status", render)
+render(noctalia.state.get("stealthbar.status"))
+
+function onClick()
+  noctalia.togglePanel("ronll/stealthbar:panel")
 end

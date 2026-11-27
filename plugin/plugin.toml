@@ -1,24 +1,29 @@
 id = "ronll/stealthbar"
 name = "Stealth Pro II"
-version = "0.1.1"
-plugin_api = 3
+version = "0.2.0"
+plugin_api = 43
 author = "Ronll"
 license = "MIT"
 icon = "headphones"
-description = "Battery, charging and mic mute of a Turtle Beach Stealth Pro II headset; shown only while the headset is on."
+description = "Battery, mic and settings of a Turtle Beach Stealth Pro II headset: a bar capsule shown only while the headset is on, and a panel with everything it reports."
 dependencies = ["stealthbar"]
 tags = ["bar", "indicator", "audio", "battery"]
+
+[[setting]]
+key = "command"
+type = "string"
+label_key = "settings.command.label"
+description_key = "settings.command.description"
+default = "stealthbar watch"
+
+# The single owner of the daemon; the widget and panel read its state.
+[[service]]
+id = "service"
+entry = "service.luau"
 
 [[widget]]
 id = "stealthbar"
 entry = "widget.luau"
-
-  [[widget.setting]]
-  key = "command"
-  type = "string"
-  label_key = "settings.command.label"
-  description_key = "settings.command.description"
-  default = "stealthbar watch"
 
   [[widget.setting]]
   key = "low_battery"
@@ -29,3 +34,13 @@ entry = "widget.luau"
   min = 0
   max = 100
   step = 5
+
+# Opened by clicking the capsule, or: noctalia msg panel-toggle ronll/stealthbar:panel
+[[panel]]
+id = "panel"
+entry = "panel.luau"
+width = 340
+height = 560
+placement = "attached"
+position = "auto"
+open_near_click = true

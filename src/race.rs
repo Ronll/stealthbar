@@ -11,16 +11,31 @@ pub const CMD_KVP: u16 = 0x9902;
 pub const CMD_LINK: u16 = 0x2cb1;
 
 pub struct Packet {
+    /// 5a command, 5b response, 5c command without response, 5d indication
+    pub kind: u8,
     pub cmd: u16,
     pub payload: Vec<u8>,
 }
 
 /// An output report asking for a record (`S` + name subscribes: the headset answers now and pushes changes).
 pub fn subscribe(record: &str, token: u8) -> [u8; REPORT_LEN] {
-    let mut body = vec![
-        0x48, 0x01, 0x5b, token, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x61, 0x00, b'S',
-    ];
+    let mut body = vec![0x61, 0x00, b'S'];
     body.extend_from_slice(record.as_bytes());
+    request(0x01, &body, token)
+}
+
+/// An output report writing one key, as Swarm II does: `{"0xa20":"2"}`. The JSON must stay short enough to fit
+/// one report (about 32 characters).
+pub fn set_kvp(key: &str, value: &str, token: u8) -> [u8; REPORT_LEN] {
+    let mut body = b"\xb7set_kvp\xff".to_vec();
+    body.extend_from_slice(format!(r#"{{"0x{key}":"{value}"}}"#).as_bytes());
+    request(0x03, &body, token)
+}
+
+/// RACE 0x9902 request: `48 <op> <session> <counter> <seq> 00*7 <body>`; the device echoes the token bytes.
+fn request(op: u8, payload: &[u8], token: u8) -> [u8; REPORT_LEN] {
+    let mut body = vec![0x48, op, 0x5b, token, 0x01, 0, 0, 0, 0, 0, 0, 0];
+    body.extend_from_slice(payload);
     let len = (body.len() + 2) as u16;
     let mut race = vec![0x05, 0x5a];
     race.extend_from_slice(&len.to_le_bytes());
@@ -69,6 +84,7 @@ impl Reassembler {
             }
             let packet: Vec<u8> = self.buf.drain(..4 + len).collect();
             packets.push(Packet {
+                kind: packet[1],
                 cmd: u16::from_le_bytes([packet[4], packet[5]]),
                 payload: packet[6..].to_vec(),
             });
