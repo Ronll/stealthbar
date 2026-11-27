@@ -64,7 +64,7 @@ local function body(s)
     }),
     section("Sound", {
       row("Volume", str(d.volume, "%")),
-      row("Game / chat mix", if d.chat_mix == nil then "—" else `{100 - d.chat_mix} / {d.chat_mix}`),
+      row("Chat wheel", str(d.chat_mix, "%")),
       row("Noise cancellation", onLevel(d.anc)),
       row("Superhuman Hearing", shhText),
       row("Game EQ", str(eq.game)),

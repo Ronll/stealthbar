@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::config::ChatMix;
+use crate::config::{ChatMix, Mode};
 
 /// The wheel's position as the headset reports it in pushes of key 0x510: an absolute 0-100 mix the headset keeps
 /// itself, clamped at 0 and 100. Measured on a 2283 dock: a slow notch moves it by 5, a normal one by 10, a fast
@@ -19,6 +19,7 @@ use crate::config::ChatMix;
 #[derive(Default)]
 pub struct Wheel {
     pub mix: Option<u8>,
+    detent: bool,
     seen_at: Option<Instant>,
     /// NEAP WORKAROUND: a far first reading after rest, waiting for confirmation (value, when it arrived)
     doubted: Option<(u8, Instant)>,
@@ -36,6 +37,14 @@ const FIRST_NOTCH_LIMIT: i64 = 15;
 const CONFIRM_AFTER: Duration = Duration::from_millis(700);
 
 impl Wheel {
+    /// `detent`: stop at 50 when a move crosses it (crossfade mode).
+    pub fn new(detent: bool) -> Self {
+        Self {
+            detent,
+            ..Self::default()
+        }
+    }
+
     /// Take a pushed reading; true when the mix moved.
     pub fn read(&mut self, value: i64, now: Instant) -> bool {
         let value = value.clamp(0, 100) as u8;
@@ -66,8 +75,10 @@ impl Wheel {
 
     fn set(&mut self, value: u8) -> bool {
         let mut mix = value;
-        // centre detent (as Neap): a move across 50 stops at 50 for one report, so "both at full" is easy to hit
-        if let Some(old) = self.mix
+        // crossfade mode's centre detent (as Neap): a move across 50 stops at 50 for one report, so "both at
+        // full" is easy to hit; in volume mode 50 is nothing special
+        if self.detent
+            && let Some(old) = self.mix
             && ((old < 50 && mix > 50) || (old > 50 && mix < 50))
         {
             mix = 50;
@@ -78,6 +89,7 @@ impl Wheel {
     }
 }
 
+/// Crossfade: full from the centre to the chat end, down to silent at the game end.
 pub fn chat_gain(mix: u8) -> f64 {
     (2.0 * f64::from(mix.min(100)) / 100.0).min(1.0)
 }
@@ -102,9 +114,15 @@ pub fn apply(cfg: &ChatMix, mix: u8, seen: &mut HashSet<u64>, all: bool) {
         if props["media.class"] != "Stream/Output/Audio" {
             continue;
         }
+        let crossfade = cfg.mode == Mode::Crossfade;
         let target = if is_chat(cfg, props) {
-            chat_gain(mix)
-        } else if cfg.duck_game {
+            // volume mode: the wheel's value is the volume as mixers show it (wpctl's linear scale)
+            if crossfade {
+                chat_gain(mix)
+            } else {
+                f64::from(mix.min(100)) / 100.0
+            }
+        } else if crossfade && cfg.duck_game {
             game_gain(mix)
         } else {
             continue;
@@ -163,7 +181,10 @@ mod tests {
     fn wheel_follows_pushes_with_detent_and_neap_guard() {
         let t = Instant::now();
         let ms = |n| t + Duration::from_millis(n);
-        let mut w = Wheel::default();
+        let mut w = Wheel {
+            detent: true,
+            ..Wheel::default()
+        };
         assert!(w.mix.is_none());
         assert!(w.read(100, ms(0)) && w.mix == Some(100)); // first push is absolute
         assert!(w.read(90, ms(100)) && w.mix == Some(90));
@@ -177,6 +198,10 @@ mod tests {
         assert!(!w.read(10, ms(6000)));
         assert!(!w.tick(ms(6300)));
         assert!(w.tick(ms(6800)) && w.mix == Some(10));
+        // volume mode: no detent
+        let mut v = Wheel::default();
+        v.read(40, ms(0));
+        assert!(v.read(60, ms(100)) && v.mix == Some(60));
     }
 
     #[test]

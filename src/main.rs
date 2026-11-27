@@ -304,7 +304,7 @@ fn run(
     let mut busy_until = Instant::now();
     // per connection: the chat-mix writes (enable wheel reports, wheel job) are sent once all records are in
     let mut mix_setup_done = false;
-    let mut wheel = mix::Wheel::default();
+    let mut wheel = mix::Wheel::new(cfg.chat_mix.mode == config::Mode::Crossfade);
     let mut mix_moved = false;
     let mut mix_applied_at = Instant::now();
     let mut mix_seen = HashSet::new();

@@ -135,7 +135,7 @@ What the UI shows:
   charging; red at or below `low_battery` unless charging), plus a tooltip (battery, charging, mic).
 - **Panel** (click the capsule, or `noctalia msg panel-toggle ronll/stealthbar:panel`): battery (headset, charging,
   spare battery in the dock), microphone (boom/built-in, muted, sensitivity, monitoring, AI noise reduction, noise
-  gate), sound (volume, game/chat mix, noise cancellation, Superhuman Hearing, game and mic EQ presets), controls
+  gate), sound (volume, chat wheel, noise cancellation, Superhuman Hearing, game and mic EQ presets), controls
   (lower wheel and mode button jobs, auto off, wake on motion), device (name, headset and transmitter product ids
   and firmware). Read-only; it closes when you click outside it.
 
@@ -158,23 +158,25 @@ editing.
 ```toml
 [chat_mix]
 enabled = true            # default false
+mode = "volume"           # default; or "crossfade"
 # Case-insensitive substrings matched against a playback stream's application.name, application.process.binary
 # and node.name (see `pw-dump`). Default:
 apps = ["discord", "vesktop", "webcord", "WEBRTC VoiceEngine"]
-duck_game = false         # also lower every other stream while the wheel leans toward chat
+duck_game = false         # crossfade only: also lower every other stream while the wheel leans toward chat
 set_wheel = true          # make the lower left wheel the game/chat wheel (PC platform) on every connect
 ```
 
 How it behaves:
 
-- The mix is the wheel's value, 0 (game only) … 50 (centre) … 100 (chat only). Same curve as Neap: the centre
-  leaves everything at full volume; toward game lowers the chat apps (to silent at the end), toward chat lowers
-  the rest if `duck_game` is on.
+- **`mode = "volume"`** (default): the wheel's value is the chat apps' volume, as mixers show it: game end 0 %
+  (silent) … chat end 100 %. Nothing else is touched.
+- **`mode = "crossfade"`**: Neap's game/chat crossfade. 50 is the centre with both at full volume; toward game
+  lowers the chat apps (silent at the game end), toward chat lowers everything else if `duck_game` is on. A move
+  across 50 stops there for one report (centre detent), so the centre is easy to hit.
 - The headset pushes the wheel's value (key `0x510`) on every notch: an absolute 0–100 position it keeps itself,
   clamped at the ends. Measured on a `2283` dock: a slow notch moves it by 5, a normal one by 10, a fast spin by
   20–30 per report; nothing arrives while the wheel is still. A *read* of `0x510` (and its value right after
   reports are switched on) is a stale 0, so only pushes count, and nothing changes until the wheel has moved.
-- A move across 50 stops at 50 for one report (centre detent), so "both at full" is easy to hit.
 - Neap workaround (marked in `src/mix.rs`): a first reading after ≥ 0.5 s of rest that jumps more than 15 is held
   until the next reading (or 0.7 s without one), because Neap saw stray readings there. Not seen on our dock.
 - Volumes are set per stream with `wpctl set-volume <stream id> <gain>`: every matching stream when the mix

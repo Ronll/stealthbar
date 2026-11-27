@@ -11,6 +11,17 @@ pub struct Config {
     pub chat_mix: ChatMix,
 }
 
+/// How the wheel's 0-100 value is applied.
+#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// The value is the chat apps' volume: 0 silent … 100 full. Nothing else is touched.
+    Volume,
+    /// Neap-style game/chat crossfade around a centre (50 = both full, with a detent there): toward game lowers the
+    /// chat apps, toward chat lowers everything else when `duck_game` is on.
+    Crossfade,
+}
+
 /// The headset's game/chat wheel drives the volume of chat apps' playback streams in PipeWire.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -19,7 +30,8 @@ pub struct ChatMix {
     /// Case-insensitive substrings matched against a stream's application.name, application.process.binary
     /// and node.name.
     pub apps: Vec<String>,
-    /// Also turn everything else down while the wheel leans toward chat.
+    pub mode: Mode,
+    /// Crossfade mode only: also turn everything else down while the wheel leans toward chat.
     pub duck_game: bool,
     /// Set the second left wheel's job (PC platform, key 0xa20) to game/chat mix when the headset connects.
     pub set_wheel: bool,
@@ -32,6 +44,7 @@ impl Default for ChatMix {
             apps: ["discord", "vesktop", "webcord", "WEBRTC VoiceEngine"]
                 .map(String::from)
                 .into(),
+            mode: Mode::Volume,
             duck_game: false,
             set_wheel: true,
         }
@@ -69,6 +82,9 @@ mod tests {
     fn parses_and_defaults() {
         let c: Config = toml::from_str("[chat_mix]\nenabled = true\n").unwrap();
         assert!(c.chat_mix.enabled && c.chat_mix.set_wheel && !c.chat_mix.duck_game);
+        assert_eq!(c.chat_mix.mode, Mode::Volume);
+        let c: Config = toml::from_str("[chat_mix]\nmode = \"crossfade\"\n").unwrap();
+        assert_eq!(c.chat_mix.mode, Mode::Crossfade);
         assert!(c.chat_mix.apps.iter().any(|a| a == "discord"));
         assert!(!Config::default().chat_mix.enabled);
         assert!(toml::from_str::<Config>("[chat_mix]\nbogus = 1\n").is_err());
