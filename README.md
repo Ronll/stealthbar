@@ -361,22 +361,30 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
   `stealthbar` then reports `present: true, on: false` forever. A physical unplug/replug fixes it; a plain
   `USBDEVFS_RESET` did not in our tests. A software replug after every resume is the usual remedy: de-authorize
   and re-authorize the dock in sysfs, which makes the kernel drop and re-enumerate it like a replug (sound stops
-  for about a second). As root, e.g. from a `systemd-sleep` hook (`/usr/lib/systemd/system-sleep/stealthbar`,
-  executable; NixOS: `powerManagement.resumeCommands`):
+  for about a second). Wait ~20 s first: a dock behind a hub can re-enumerate on its own that late after resume,
+  which would undo an earlier replug. As a systemd unit, `/etc/systemd/system/stealth-pro-ii-replug.service`, then
+  `systemctl enable stealth-pro-ii-replug` (NixOS: the same as a `systemd.services` entry):
 
-  ```sh
-  #!/bin/sh
-  # $1 is "pre" or "post"; replug the Stealth Pro II dock (10f5:2283) after resume
-  [ "$1" = post ] || exit 0
-  for d in /sys/bus/usb/devices/*; do
-    [ "$(cat "$d/idVendor" 2>/dev/null)" = 10f5 ] && [ "$(cat "$d/idProduct")" = 2283 ] || continue
-    echo 0 > "$d/authorized"; sleep 1; echo 1 > "$d/authorized"
-  done
+  ```ini
+  [Unit]
+  Description=Soft-replug the Stealth Pro II dock after resume
+  After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+  [Service]
+  Type=oneshot
+  # $$ because systemd itself expands $
+  ExecStart=/bin/sh -c 'sleep 20; for d in /sys/bus/usb/devices/*; do \
+    [ "$$(cat $$d/idVendor 2>/dev/null)" = 10f5 ] && [ "$$(cat $$d/idProduct)" = 2283 ] || continue; \
+    echo 0 > $$d/authorized; sleep 1; echo 1 > $$d/authorized; done'
+
+  [Install]
+  WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
   ```
 
   Whether this clears every stuck state is not confirmed yet (it needs a stuck dock to try on); `stealthbar
-  watch` picks the dock up again on its own after the re-enumeration. The dock also seems to decide its platform mode (PC / PlayStation / Xbox) at
-  enumeration time, and a wrong guess sticks until the next plug-in; this is under investigation.
+  watch` picks the dock up again on its own after the re-enumeration. The dock also seems to decide its platform
+  mode (PC / PlayStation / Xbox) at enumeration time, and a wrong guess sticks until the next plug-in; this is
+  under investigation.
 
 ## Troubleshooting
 
