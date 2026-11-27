@@ -386,39 +386,23 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
 - **Stuck dock:** after a laptop suspend/resume (or other USB re-enumeration, e.g. through a hub) the dock can come
   back in a state where it **ignores system volume and answers no HID requests** (every GET_REPORT is empty).
   `stealthbar` then reports `present: true, on: false` forever. A physical unplug/replug fixes it; a plain
-  `USBDEVFS_RESET` did not in our tests. A software replug after every resume is the usual remedy: de-authorize
-  and re-authorize the dock in sysfs, which makes the kernel drop and re-enumerate it like a replug (sound stops
-  for about a second). Wait ~20 s first: a dock behind a hub can re-enumerate on its own that late after resume,
-  which would undo an earlier replug. As a systemd unit, `/etc/systemd/system/stealth-pro-ii-replug.service`, then
-  `systemctl enable stealth-pro-ii-replug` (NixOS: the same as a `systemd.services` entry):
-
-  ```ini
-  [Unit]
-  Description=Soft-replug the Stealth Pro II dock after resume
-  After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
-
-  [Service]
-  Type=oneshot
-  # $$ because systemd itself expands $
-  ExecStart=/bin/sh -c 'sleep 20; for d in /sys/bus/usb/devices/*; do \
-    [ "$$(cat $$d/idVendor 2>/dev/null)" = 10f5 ] && [ "$$(cat $$d/idProduct)" = 2283 ] || continue; \
-    echo 0 > $$d/authorized; sleep 1; echo 1 > $$d/authorized; done'
-
-  [Install]
-  WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
-  ```
-
-  Whether this clears every stuck state is not confirmed yet (it needs a stuck dock to try on); `stealthbar
-  watch` picks the dock up again on its own after the re-enumeration. The dock also seems to decide its platform
-  mode (PC / PlayStation / Xbox) at enumeration time, and a wrong guess sticks until the next plug-in; this is
-  under investigation.
+  `USBDEVFS_RESET` did not in our tests, and neither did de-/re-authorizing the dock in sysfs (`authorized` 0 → 1,
+  tested both from a resume hook and by hand on a stuck dock): the sound card keeps working, the HID channel stays
+  silent. What works is a power cycle of the dock: unplug it, or flip the dock's **Xbox / other switch** to Xbox and
+  back (it restarts the dock). While stuck, the widget stays hidden because the headset never answers.
+- **The Xbox / other switch:** on the Xbox edition's dock it picks the USB mode. In the PC ("other") position the
+  dock is `10f5:2283`, a high-speed USB Audio Class 1 card plus the HID interface this tool uses. In the Xbox
+  position it re-enumerates as `10f5:2284`, full speed, with only two vendor-specific (Xbox GIP) interfaces that
+  Linux binds to `xpad`: no sound card and nothing stealthbar can read. Keep it on the PC position. (Switching
+  over, the dock briefly shows up as `0e8d:0003`, its MediaTek chip.) Turtle Beach's app also shows a platform mode
+  (PC / PlayStation / Xbox); which key holds that is still unknown.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
 | `{"present":false,...}` | no supported device found: check `lsusb | grep 10f5`; check the product id is in the family above |
-| `present` true, `on` false, headset is on | stuck dock (replug it), another program is reading the dock, or the headset is paired to another transmitter (CrossPlay) |
+| `present` true, `on` false, headset is on | stuck dock (replug it, or flip the dock's Xbox / other switch to Xbox and back), another program is reading the dock, or the headset is paired to another transmitter (CrossPlay) |
 | stderr `Permission denied` | udev rule missing or not applied: install it, `udevadm trigger`, replug |
 | widget never appears | `stealthbar` not on Noctalia's PATH: set the plugin's `command` to the full path; check `stealthbar status` in a terminal; restart Noctalia |
 | some panel rows stay `—` | that record hasn't been answered yet; `stealthbar raw` shows which keys arrived |
