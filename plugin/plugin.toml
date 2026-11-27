@@ -1,6 +1,6 @@
 id = "ronll/stealthbar"
 name = "Stealth Pro II"
-version = "0.6.0"
+version = "0.6.1"
 plugin_api = 43
 author = "Ronll"
 license = "MIT"
@@ -16,6 +16,17 @@ label_key = "settings.command.label"
 description_key = "settings.command.description"
 default = "stealthbar watch"
 
+# Plugin-wide, so the widget and the panel both read it.
+[[setting]]
+key = "low_battery"
+type = "int"
+label_key = "settings.low_battery.label"
+description_key = "settings.low_battery.description"
+default = 15
+min = 0
+max = 100
+step = 5
+
 # The single owner of the daemon; the widget and panel read its state.
 [[service]]
 id = "service"
@@ -24,16 +35,6 @@ entry = "service.luau"
 [[widget]]
 id = "stealthbar"
 entry = "widget.luau"
-
-  [[widget.setting]]
-  key = "low_battery"
-  type = "int"
-  label_key = "settings.low_battery.label"
-  description_key = "settings.low_battery.description"
-  default = 15
-  min = 0
-  max = 100
-  step = 5
 
 # Opened by clicking the capsule, or: noctalia msg panel-toggle ronll/stealthbar:panel
 [[panel]]

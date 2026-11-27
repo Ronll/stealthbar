@@ -109,10 +109,10 @@ plugins from *sources*; a source of kind `path` is a directory whose subdirector
 
    [plugin_settings."ronll/stealthbar"]
    command = "stealthbar watch"             # full path if stealthbar is not on Noctalia's PATH
+   # low_battery = 15
 
    [widget.stealthbar]
    type = "ronll/stealthbar:stealthbar"
-   # low_battery = 15
 
    [bar.default]
    end = ["stealthbar", "bluetooth", "volume", "battery"]   # wherever you want it
@@ -128,7 +128,7 @@ Settings:
 | Where | Key | Default | Meaning |
 |---|---|---|---|
 | plugin | `command` | `stealthbar watch` | how the service starts the daemon; must stay a `watch` stream |
-| widget | `low_battery` | `15` | at or below this %, the glyph turns red (unless charging) |
+| plugin | `low_battery` | `15` | at or below this %, the widget's glyph and the panel's battery turn red (unless charging) |
 
 What the UI shows:
 
@@ -348,6 +348,7 @@ Commands:
 | `stealthbar watch` | (default) stream a line per change; reconnects on its own; never exits |
 | `stealthbar status` | print the state once and exit: from the running `watch` if there is one, else by reading the dock (about 2 s); never writes |
 | `stealthbar raw` | every raw key the headset reported, once, as one JSON object; for finding new keys |
+| `stealthbar log` | the running `watch`'s recent setting changes (in memory, last 200), oldest first: each write with the `stealthbar set` command behind it, each change made on the headset (buttons, Turtle Beach's app) marked `(headset)`, and power-button presses; battery, Bluetooth signal, system volume and wheel moves are left out |
 | `stealthbar set <setting> <value…>` | change a setting through the running `watch` (see above); `--list` prints the settings |
 | `stealthbar config-path` | print where the config file is read from |
 

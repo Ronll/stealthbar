@@ -6,7 +6,7 @@
     },
     "low_battery": {
       "label": "Low battery (%)",
-      "description": "At or below this the widget turns red."
+      "description": "At or below this the widget and the panel show the battery in red."
     }
   }
 }

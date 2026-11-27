@@ -67,6 +67,12 @@ const MIX_REFRESH: Duration = Duration::from_secs(2);
 const PENDING_FOR: Duration = Duration::from_secs(3);
 /// `[audio] follow_headset`: the headset counts as off for the dock's sound card after this long without answers.
 const OFF_FOR: Duration = Duration::from_secs(8);
+/// `stealthbar log`: how many setting changes the daemon remembers (in memory only), and which keys are left out
+/// because they change on their own all the time (battery, Bluetooth signal, system volume, the chat wheel).
+const HISTORY: usize = 200;
+const NOT_LOGGED: [&str; 4] = ["240", "320", "2a0", "510"];
+/// A pushed value that matches one of our writes from this long ago is that write's confirmation, not a change.
+const CONFIRM_WITHIN: Duration = Duration::from_secs(10);
 const ACTIVE_FOR: Duration = Duration::from_secs(1);
 
 /// Records the headset answers (each owns a key range: Inf 1xx, GSI 2xx, 3DT 5xx, Mic 6xx, SAF 7xx, Enc axx,
@@ -126,6 +132,7 @@ fn main() {
         "watch" => watch(),
         "status" => once(false),
         "raw" => once(true),
+        "log" => log_cli(),
         "set" => set_cli(),
         "config-path" => println!(
             "{}",
@@ -186,8 +193,52 @@ fn watch() {
                     .unwrap_or_else(|| State::default().to_json())
                     .to_string()),
                 control::Cmd::Raw => Ok("{}".into()),
+                control::Cmd::Log => Ok("[]".into()),
                 control::Cmd::Set(..) => Err("no Stealth Pro II dock found".into()),
             });
+        }
+    }
+}
+
+/// Add a line to the change history, with the local time.
+fn remember(history: &mut VecDeque<String>, line: String) {
+    if history.len() == HISTORY {
+        history.pop_front();
+    }
+    history.push_back(format!("{} {line}", clock()));
+}
+
+/// A key's value for the log: strings without their JSON quotes.
+fn show(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), str::to_owned)
+}
+
+/// Local time as HH:MM:SS.
+fn clock() -> String {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
+/// The record holding a transmitter slot key (0x400-0x47f: TX1-TX4), e.g. "402" -> "TX1".
+fn transmitter_record(key: &str) -> Option<String> {
+    let k = u32::from_str_radix(key, 16).ok()?;
+    (0x400..0x480)
+        .contains(&k)
+        .then(|| format!("TX{}", (k - 0x400) / 0x20 + 1))
+}
+
+/// `stealthbar log`: the running daemon's recent setting changes, oldest first.
+fn log_cli() {
+    match control::request("log") {
+        Ok(reply) => match serde_json::from_str::<Vec<String>>(&reply) {
+            Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+            Err(_) => eprintln!("stealthbar: {reply}"),
+        },
+        Err(e) => {
+            eprintln!("stealthbar: no running `stealthbar watch` ({e})");
+            std::process::exit(1);
         }
     }
 }
@@ -427,6 +478,9 @@ fn run(
     let mut told: Option<bool> = None;
     let mut off_since: Option<Instant> = None;
     let mut pending: HashMap<String, (String, Instant)> = HashMap::new();
+    // `stealthbar log`: setting changes, newest last; and our recent writes, to tell them from the headset's own
+    let mut history: VecDeque<String> = VecDeque::new();
+    let mut written: HashMap<String, (String, Instant)> = HashMap::new();
     let mut wheel = mix::Wheel::new(cfg.chat_mix.mode == config::Mode::Crossfade);
     let mut mix_moved = false;
     let mut mix_applied_at = Instant::now();
@@ -519,6 +573,31 @@ fn run(
                             }
                             if pushed {
                                 pending.retain(|k, _| !kvp.contains_key(k));
+                                // changes made on the headset (buttons, Turtle Beach's app, the headset itself)
+                                for (k, v) in kvp {
+                                    let recent = |(w, at): &(String, Instant)| {
+                                        at.elapsed() < CONFIRM_WITHIN
+                                            && Some(w.as_str()) == v.as_str()
+                                    };
+                                    // a transmitter record re-read after we wrote one of its keys
+                                    let our_record = transmitter_record(k).is_some_and(|r| {
+                                        written.iter().any(|(wk, (_, at))| {
+                                            at.elapsed() < CONFIRM_WITHIN
+                                                && transmitter_record(wk).as_ref() == Some(&r)
+                                        })
+                                    });
+                                    let ours = written.get(k).is_some_and(recent) || our_record;
+                                    if let Some(old) = state.keys.get(k)
+                                        && old != v
+                                        && !ours
+                                        && !NOT_LOGGED.contains(&k.as_str())
+                                    {
+                                        remember(
+                                            &mut history,
+                                            format!("{k}: {} -> {} (headset)", show(old), show(v)),
+                                        );
+                                    }
+                                }
                             }
                             if pushed && kvp.contains_key("510") {
                                 busy_until = busy_until.max(Instant::now() + ACTIVE_FOR);
@@ -526,10 +605,16 @@ fn run(
 
                             // a short press of the power button, handed to us (see config::Buttons): the
                             // headset flips 0x520 on each press
-                            if pushed
-                                && let (Some(new), Some(old)) =
-                                    (kvp.get("520"), state.keys.get("520"))
-                                && new != old
+                            let pressed = pushed
+                                && matches!((kvp.get("520"), state.keys.get("520")),
+                                    (Some(new), Some(old)) if new != old);
+                            if pressed {
+                                remember(
+                                    &mut history,
+                                    format!("power button -> {}", cfg.buttons.power),
+                                );
+                            }
+                            if pressed
                                 && let Some(write) = power_button(&cfg.buttons.power, &state.keys)
                             {
                                 token = token.wrapping_add(1);
@@ -558,6 +643,7 @@ fn run(
             control::serve(l, |cmd| match cmd {
                 control::Cmd::Status => Ok(state.to_json().to_string()),
                 control::Cmd::Raw => Ok(json!(state.keys).to_string()),
+                control::Cmd::Log => Ok(json!(history).to_string()),
                 control::Cmd::Set(name, args) => {
                     if !state.on {
                         return Err("the headset is off".into());
@@ -567,14 +653,23 @@ fn run(
                     pending.retain(|_, (_, at)| now.duration_since(*at) < PENDING_FOR);
                     let mut keys = state.keys.clone();
                     keys.extend(pending.iter().map(|(k, (v, _))| (k.clone(), json!(v))));
+                    let command = format!("stealthbar set {name} {}", args.join(" "));
                     for write in settings::parse(&name, &args, &keys)? {
                         token = token.wrapping_add(1);
                         match write {
                             settings::Write::Kvp(key, value) => {
                                 outbox.push_back(race::set_kvp(&key, &value, token));
+                                remember(&mut history, format!("{key}: -> {value} ({command})"));
+                                // the dock's light keys are not pushed back: read their record again
+                                if let Some(record) = transmitter_record(&key) {
+                                    token = token.wrapping_add(1);
+                                    outbox.push_back(race::subscribe(&record, token));
+                                }
+                                written.insert(key.clone(), (value.clone(), now));
                                 pending.insert(key, (value, now));
                             }
                             settings::Write::Loudness(db) => {
+                                remember(&mut history, format!("loudness: -> {db} dB ({command})"));
                                 outbox.push_back(race::dsp(0, race::DSP_INPUT_LEVEL, db));
                                 // read it back: the set's reply carries no value
                                 outbox.push_back(race::dsp(1, race::DSP_INPUT_LEVEL, 0.0));

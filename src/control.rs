@@ -1,6 +1,6 @@
 //! The running `watch` is the dock's only reader (a second reader takes replies off the same queue), so `set`,
 //! `status` and `raw` go to it over a Unix socket: `$XDG_RUNTIME_DIR/stealthbar.sock`, or `/tmp/stealthbar-<uid>.sock`.
-//! Protocol: one line in (`status`, `raw`, `set <setting> <value…>`), one line out (JSON, `ok`, or `error: …`).
+//! Protocol: one line in (`status`, `raw`, `log`, `set <setting> <value…>`), one line out (JSON, `ok`, or `error: …`).
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
@@ -12,6 +12,7 @@ use std::time::Duration;
 pub enum Cmd {
     Status,
     Raw,
+    Log,
     Set(String, Vec<String>),
 }
 
@@ -68,10 +69,11 @@ pub fn serve(listener: &UnixListener, mut handle: impl FnMut(Cmd) -> Result<Stri
         let reply = match words.first().map(String::as_str) {
             Some("status") => handle(Cmd::Status),
             Some("raw") => handle(Cmd::Raw),
+            Some("log") => handle(Cmd::Log),
             Some("set") if words.len() >= 3 => {
                 handle(Cmd::Set(words[1].clone(), words[2..].to_vec()))
             }
-            _ => Err("expected: status | raw | set <setting> <value…>".into()),
+            _ => Err("expected: status | raw | log | set <setting> <value…>".into()),
         };
         let reply = reply.unwrap_or_else(|e| format!("error: {e}"));
         let _ = (&stream).write_all(format!("{reply}\n").as_bytes());

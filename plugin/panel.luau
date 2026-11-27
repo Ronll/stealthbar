@@ -196,7 +196,7 @@ end
 local function overview(s, d)
   local tx, mic, anc, shh = d.transmitter or {}, d.mic or {}, d.anc or {}, d.superhuman_hearing or {}
   local conn = d.connection or {}
-  local low = noctalia.getConfig("low_battery") or 15
+  local low = tonumber(noctalia.getConfig("low_battery")) or 15
 
   local micText = "—"
   if mic.source == "boom" then
