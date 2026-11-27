@@ -48,7 +48,7 @@ fn word(options: &[&'static str], index: Option<i64>) -> Option<&'static str> {
 }
 
 /// Custom preset names, slots 1-5 (records CG1-CG5 at 1700, 1720, … or CM1-CM5 at 1800, …).
-fn custom_names(keys: &Keys, base: u32) -> Vec<Option<String>> {
+pub fn custom_names(keys: &Keys, base: u32) -> Vec<Option<String>> {
     (0..5)
         .map(|i| {
             let name = keys.get(&format!("{:x}", base + i * 0x20))?["name"].as_str()?;

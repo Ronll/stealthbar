@@ -160,33 +160,48 @@ the panel within a second. `stealthbar set --list` prints this table:
 
 | Setting | Values | Key / what |
 |---|---|---|
-| `anc` | `on` / `off` | active noise cancellation (`750`) |
+| `anc` | `on` / `off` / `toggle` | active noise cancellation (`750`) |
 | `anc-level` | 0–100 | 0 = ambient/transparency … 100 = full ANC (`760`) |
-| `shh` | `on` / `off` | Superhuman Hearing (`720`) |
+| `shh` | `on` / `off` / `toggle` | Superhuman Hearing (`720`) |
 | `shh-mode` | `legacy` / `footsteps` / `gunshots` | (`730`) |
 | `shh-level` | 0–100 | (`740`) |
-| `gate` | `on` / `off` | mic noise gate (`700`) |
+| `gate` | `on` / `off` / `toggle` | mic noise gate (`700`) |
 | `gate-level` | 0–100 | (`710`) |
 | `monitoring` | 0–100 | hear your own voice / sidetone (`620`) |
-| `noise-reduction` | `on` / `off` | AI noise reduction of the mic (`630`) |
+| `noise-reduction` | `on` / `off` / `toggle` | AI noise reduction of the mic (`630`) |
 | `sensitivity` | 0–100 | mic sensitivity (`610`); it follows the system mic input level, so usually set that instead |
-| `mic-mute` | `on` / `off` | built-in mics' mute (`650`); refused while the boom mic is in use (its arm is the mute) |
-| `eq` | `signature` / `bass` / `bass-treble` / `vocal` / `custom1`–`custom5` | game EQ preset (`1210`) |
+| `mic-mute` | `on` / `off` / `toggle` | built-in mics' mute (`650`); refused while the boom mic is in use (its arm is the mute) |
+| `eq` | `signature` / `bass` / `bass-treble` / `vocal` / `custom1`–`custom5` / `next` / `prev` | game EQ preset (`1210`) |
 | `eq-band` | `<1-10> <dB -9..9>` | game EQ band at 32, 63, 125, 250, 500 Hz, 1, 2, 4, 8, 16 kHz, steps of 0.5 dB (`1220`–`12b0`); the preset becomes "custom (unsaved)" |
-| `mic-eq` | `signature` / `full` / `clarity` / `smooth` / `custom1`–`custom5` | mic EQ preset (`1310`) |
+| `mic-eq` | `signature` / `full` / `clarity` / `smooth` / `custom1`–`custom5` / `next` / `prev` | mic EQ preset (`1310`) |
 | `mic-eq-band` | `<1-10> <dB -9..9>` | mic EQ band at 100, 160, 250, 400, 630 Hz, 1, 1.6, 2.5, 4, 6.3 kHz (`1320`–`13b0`) |
 | `wheel`, `wheel-playstation`, `wheel-xbox` | `monitoring` / `chat` / `bass` / `treble` / `gate` | lower left wheel's job per platform (`a20`, `a00`, `a10`) |
 | `button`, `button-playstation`, `button-xbox` | `anc` / `preset` / `gate` | mode button's job per platform (`b20`, `b00`, `b10`) |
 | `auto-off` | `never` / `5` / `10` / `20` / `30` | minutes (`280`) |
-| `wake-on-motion` | `on` / `off` | (`2e0`) |
+| `wake-on-motion` | `on` / `off` / `toggle` | (`2e0`) |
 | `prompts` | 0–100 | voice prompt volume (`2d0`) |
 | `ring-light`, `slot-light` | 0–100 | the selected transmitter's status light and (charging dock) battery-slot light (slot key + 1 / + 2, e.g. `401`/`402`) |
 | `loudness` | dB −24…6 | playback level before the EQ, **stored on the headset**; factory −12; +6 is clearly louder, but boosting with EQ or Superhuman Hearing on top can clip (RACE `0x000A`, not a key) |
 
 Every setting except `loudness` is stored on the headset too, as with Turtle Beach's app. Not offered: saving or
 deleting custom EQ presets (the app writes names longer than one report in a way not captured yet), the master
-volume (that is the system volume), the wheel position (read-only), and firmware updates. Examples for key
-bindings: `stealthbar set anc on`, `stealthbar set eq bass`, `stealthbar set shh-mode footsteps`.
+volume (that is the system volume), the wheel position (read-only), and firmware updates.
+
+**Keyboard shortcuts.** `toggle` flips an on/off setting and `next` / `prev` step through the EQ presets (the four
+built-in ones, then the custom slots that have a name, wrapping around), both from what the headset last reported.
+A value just written counts as current until the headset pushes it back (at most 3 s), so quick repeated presses
+build on each other. Bind them in your compositor, e.g. niri:
+
+```kdl
+binds {
+    Mod+XF86AudioMute { spawn "stealthbar" "set" "anc" "toggle"; }
+    Mod+XF86AudioNext { spawn "stealthbar" "set" "eq" "next"; }
+    Mod+XF86AudioPrev { spawn "stealthbar" "set" "eq" "prev"; }
+}
+```
+
+(Hyprland: `bind = SUPER, XF86AudioMute, exec, stealthbar set anc toggle`; sway: `bindsym Mod4+XF86AudioMute exec
+stealthbar set anc toggle`.)
 
 ### Other bars
 
@@ -344,7 +359,23 @@ Errors go to stderr; the exit code is 0 unless the command line is wrong.
 - **Stuck dock:** after a laptop suspend/resume (or other USB re-enumeration, e.g. through a hub) the dock can come
   back in a state where it **ignores system volume and answers no HID requests** (every GET_REPORT is empty).
   `stealthbar` then reports `present: true, on: false` forever. A physical unplug/replug fixes it; a plain
-  `USBDEVFS_RESET` did not in our tests. The dock also seems to decide its platform mode (PC / PlayStation / Xbox) at
+  `USBDEVFS_RESET` did not in our tests. A software replug after every resume is the usual remedy: de-authorize
+  and re-authorize the dock in sysfs, which makes the kernel drop and re-enumerate it like a replug (sound stops
+  for about a second). As root, e.g. from a `systemd-sleep` hook (`/usr/lib/systemd/system-sleep/stealthbar`,
+  executable; NixOS: `powerManagement.resumeCommands`):
+
+  ```sh
+  #!/bin/sh
+  # $1 is "pre" or "post"; replug the Stealth Pro II dock (10f5:2283) after resume
+  [ "$1" = post ] || exit 0
+  for d in /sys/bus/usb/devices/*; do
+    [ "$(cat "$d/idVendor" 2>/dev/null)" = 10f5 ] && [ "$(cat "$d/idProduct")" = 2283 ] || continue
+    echo 0 > "$d/authorized"; sleep 1; echo 1 > "$d/authorized"
+  done
+  ```
+
+  Whether this clears every stuck state is not confirmed yet (it needs a stuck dock to try on); `stealthbar
+  watch` picks the dock up again on its own after the re-enumeration. The dock also seems to decide its platform mode (PC / PlayStation / Xbox) at
   enumeration time, and a wrong guess sticks until the next plug-in; this is under investigation.
 
 ## Troubleshooting

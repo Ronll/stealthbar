@@ -2,7 +2,7 @@
 //! II) or Neap are known to write are offered (sources: Neap FINDINGS.md, swarm2linux docs/protocol.md). Nothing
 //! here writes a transmitter slot's base key, RACE storage or firmware commands.
 
-use crate::decode::Keys;
+use crate::decode::{Keys, custom_names};
 use serde_json::Value;
 
 /// One write to the headset.
@@ -16,20 +16,20 @@ pub enum Write {
 
 /// Name, accepted values, what it does. Printed by `stealthbar set --list` and kept in sync with the README.
 pub const TABLE: &[(&str, &str, &str)] = &[
-    ("anc", "on|off", "active noise cancellation (0x750)"),
+    ("anc", "on|off|toggle", "active noise cancellation (0x750)"),
     (
         "anc-level",
         "0-100",
         "0 = ambient/transparency … 100 = full ANC (0x760)",
     ),
-    ("shh", "on|off", "Superhuman Hearing (0x720)"),
+    ("shh", "on|off|toggle", "Superhuman Hearing (0x720)"),
     (
         "shh-mode",
         "legacy|footsteps|gunshots",
         "Superhuman Hearing mode (0x730)",
     ),
     ("shh-level", "0-100", "Superhuman Hearing level (0x740)"),
-    ("gate", "on|off", "mic noise gate (0x700)"),
+    ("gate", "on|off|toggle", "mic noise gate (0x700)"),
     ("gate-level", "0-100", "noise gate level (0x710)"),
     (
         "monitoring",
@@ -38,7 +38,7 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "noise-reduction",
-        "on|off",
+        "on|off|toggle",
         "AI noise reduction of the mic (0x630)",
     ),
     (
@@ -48,12 +48,12 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "mic-mute",
-        "on|off",
+        "on|off|toggle",
         "mute the built-in mics (only with the boom unplugged) (0x650)",
     ),
     (
         "eq",
-        "signature|bass|bass-treble|vocal|custom1-5",
+        "signature|bass|bass-treble|vocal|custom1-5|next|prev",
         "game EQ preset (0x1210)",
     ),
     (
@@ -63,7 +63,7 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "mic-eq",
-        "signature|full|clarity|smooth|custom1-5",
+        "signature|full|clarity|smooth|custom1-5|next|prev",
         "mic EQ preset (0x1310)",
     ),
     (
@@ -102,7 +102,11 @@ pub const TABLE: &[(&str, &str, &str)] = &[
         "never|5|10|20|30",
         "auto shut-off in minutes (0x280)",
     ),
-    ("wake-on-motion", "on|off", "wake when picked up (0x2e0)"),
+    (
+        "wake-on-motion",
+        "on|off|toggle",
+        "wake when picked up (0x2e0)",
+    ),
     ("prompts", "0-100", "voice prompt volume (0x2d0)"),
     (
         "ring-light",
@@ -132,11 +136,17 @@ fn kvp(key: &str, value: impl ToString) -> Vec<Write> {
     vec![Write::Kvp(key.into(), value.to_string())]
 }
 
-fn on_off(v: &str) -> Result<u8, String> {
+/// `toggle` flips what the headset last reported for `key` (for keyboard shortcuts).
+fn on_off(v: &str, key: &str, keys: &Keys) -> Result<u8, String> {
     match v {
         "on" | "1" | "true" => Ok(1),
         "off" | "0" | "false" => Ok(0),
-        _ => Err(format!("expected on|off, got {v:?}")),
+        "toggle" => match keys.get(key).and_then(Value::as_str).map(str::trim) {
+            Some("0") => Ok(1),
+            Some(_) => Ok(0),
+            None => Err("the current value isn't known yet".into()),
+        },
+        _ => Err(format!("expected on|off|toggle, got {v:?}")),
     }
 }
 
@@ -152,6 +162,34 @@ fn pick(v: &str, options: &[&str]) -> Result<usize, String> {
         .iter()
         .position(|o| *o == v)
         .ok_or_else(|| format!("expected {}, got {v:?}", options.join("|")))
+}
+
+/// `next`/`prev` step through the built-in presets and the custom slots that have a name, wrapping around.
+fn step_preset(
+    v: &str,
+    key: &str,
+    names: &[&str],
+    custom_base: u32,
+    keys: &Keys,
+) -> Result<u8, String> {
+    let mut ids: Vec<u8> = (1..=names.len() as u8).collect();
+    for (i, name) in custom_names(keys, custom_base).iter().enumerate() {
+        if name.is_some() {
+            ids.push(16 + i as u8);
+        }
+    }
+    let current = keys
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|c| c.trim().parse::<u8>().ok());
+    let n = ids.len();
+    // an unsaved custom EQ (0) or an unknown preset starts from the first one
+    let next = match current.and_then(|c| ids.iter().position(|id| *id == c)) {
+        Some(i) if v == "next" => (i + 1) % n,
+        Some(i) => (i + n - 1) % n,
+        None => 0,
+    };
+    Ok(ids[next])
 }
 
 fn preset(v: &str, names: &[&str]) -> Result<u8, String> {
@@ -206,25 +244,36 @@ pub fn parse(name: &str, args: &[&str], keys: &Keys) -> Result<Vec<Write>, Strin
         Ok(kvp(key, pick(one()?, jobs)? + offset))
     };
     match name {
-        "anc" => Ok(kvp("750", on_off(one()?)?)),
+        "anc" => Ok(kvp("750", on_off(one()?, "750", keys)?)),
         "anc-level" => Ok(kvp("760", percent(one()?)?)),
-        "shh" => Ok(kvp("720", on_off(one()?)?)),
+        "shh" => Ok(kvp("720", on_off(one()?, "720", keys)?)),
         "shh-mode" => Ok(kvp("730", pick(one()?, &SHH_MODES)?)),
         "shh-level" => Ok(kvp("740", percent(one()?)?)),
-        "gate" => Ok(kvp("700", on_off(one()?)?)),
+        "gate" => Ok(kvp("700", on_off(one()?, "700", keys)?)),
         "gate-level" => Ok(kvp("710", percent(one()?)?)),
         "monitoring" => Ok(kvp("620", percent(one()?)?)),
-        "noise-reduction" => Ok(kvp("630", on_off(one()?)?)),
+        "noise-reduction" => Ok(kvp("630", on_off(one()?, "630", keys)?)),
         "sensitivity" => Ok(kvp("610", percent(one()?)?)),
         "mic-mute" => {
             // with the boom plugged in its arm is the only mute and the headset undoes 0x650 writes
             if keys.get("640").and_then(Value::as_str) == Some("1") {
                 return Err("the boom mic is in use: mute it with its arm".into());
             }
-            Ok(kvp("650", on_off(one()?)?))
+            Ok(kvp("650", on_off(one()?, "650", keys)?))
         }
-        "eq" => Ok(kvp("1210", preset(one()?, &GAME_PRESETS)?)),
-        "mic-eq" => Ok(kvp("1310", preset(one()?, &MIC_PRESETS)?)),
+        "eq" | "mic-eq" => {
+            let (key, names, customs) = if name == "eq" {
+                ("1210", &GAME_PRESETS, 0x1700)
+            } else {
+                ("1310", &MIC_PRESETS, 0x1800)
+            };
+            let v = one()?;
+            let id = match v {
+                "next" | "prev" => step_preset(v, key, names, customs, keys)?,
+                _ => preset(v, names)?,
+            };
+            Ok(kvp(key, id))
+        }
         "eq-band" => band(0x1220, args),
         "mic-eq-band" => band(0x1320, args),
         "wheel" => job("a20", &WHEEL_JOBS, 1),
@@ -234,7 +283,7 @@ pub fn parse(name: &str, args: &[&str], keys: &Keys) -> Result<Vec<Write>, Strin
         "button-playstation" => job("b00", &BUTTON_JOBS, 0),
         "button-xbox" => job("b10", &BUTTON_JOBS, 0),
         "auto-off" => Ok(kvp("280", pick(one()?, &AUTO_OFF)?)),
-        "wake-on-motion" => Ok(kvp("2e0", on_off(one()?)?)),
+        "wake-on-motion" => Ok(kvp("2e0", on_off(one()?, "2e0", keys)?)),
         "prompts" => Ok(kvp("2d0", percent(one()?)?)),
         "ring-light" | "slot-light" => {
             let slot = active_slot(keys).ok_or("no transmitter is selected yet")?;
@@ -300,6 +349,20 @@ mod tests {
         assert!(parse("ring-light", &["50"], &keys).is_err());
         keys.insert("420".into(), json!({"info": ["2"], "control": []}));
         assert_eq!(parse("ring-light", &["50"], &keys), Ok(w("421", "50")));
+        assert!(parse("anc", &["toggle"], &keys).is_err());
+        keys.insert("750".into(), json!("1"));
+        assert_eq!(parse("anc", &["toggle"], &keys), Ok(w("750", "0")));
+        keys.insert("750".into(), json!("0"));
+        assert_eq!(parse("anc", &["toggle"], &keys), Ok(w("750", "1")));
+        keys.insert("1210".into(), json!("4"));
+        assert_eq!(parse("eq", &["next"], &keys), Ok(w("1210", "1")));
+        keys.insert("1720".into(), json!({"name": "Footsteps"}));
+        assert_eq!(parse("eq", &["next"], &keys), Ok(w("1210", "17")));
+        assert_eq!(parse("eq", &["prev"], &keys), Ok(w("1210", "3")));
+        keys.insert("1210".into(), json!("17"));
+        assert_eq!(parse("eq", &["next"], &keys), Ok(w("1210", "1")));
+        keys.insert("1210".into(), json!("0"));
+        assert_eq!(parse("eq", &["prev"], &keys), Ok(w("1210", "1")));
         assert_eq!(parse("slot-light", &["5"], &keys), Ok(w("422", "5")));
     }
 }

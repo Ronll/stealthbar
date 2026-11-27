@@ -8,7 +8,7 @@ mod mix;
 mod race;
 mod settings;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -53,6 +53,9 @@ const RESCAN: Duration = Duration::from_secs(2);
 const MIX_REFRESH: Duration = Duration::from_secs(2);
 /// After a wheel report, keep polling fast this long: the rest of the turn then shows at once, and only its
 /// first notch waits for the idle poll.
+/// A value just written counts as current for this long, or until the headset pushes it back, so a second
+/// `set … toggle` / `eq next` from a quick key press builds on the first instead of the stale value.
+const PENDING_FOR: Duration = Duration::from_secs(3);
 const ACTIVE_FOR: Duration = Duration::from_secs(1);
 
 /// Records the headset answers (each owns a key range: Inf 1xx, GSI 2xx, 3DT 5xx, Mic 6xx, SAF 7xx, Enc axx,
@@ -368,6 +371,7 @@ fn run(
     let mut busy_until = Instant::now();
     // per connection: the chat-mix writes (enable wheel reports, wheel job) are sent once all records are in
     let mut mix_setup_done = false;
+    let mut pending: HashMap<String, (String, Instant)> = HashMap::new();
     let mut wheel = mix::Wheel::new(cfg.chat_mix.mode == config::Mode::Crossfade);
     let mut mix_moved = false;
     let mut mix_applied_at = Instant::now();
@@ -455,6 +459,9 @@ fn run(
                             {
                                 mix_moved = true;
                             }
+                            if pushed {
+                                pending.retain(|k, _| !kvp.contains_key(k));
+                            }
                             if pushed && kvp.contains_key("510") {
                                 busy_until = busy_until.max(Instant::now() + ACTIVE_FOR);
                             }
@@ -487,11 +494,16 @@ fn run(
                         return Err("the headset is off".into());
                     }
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                    for write in settings::parse(&name, &args, &state.keys)? {
+                    let now = Instant::now();
+                    pending.retain(|_, (_, at)| now.duration_since(*at) < PENDING_FOR);
+                    let mut keys = state.keys.clone();
+                    keys.extend(pending.iter().map(|(k, (v, _))| (k.clone(), json!(v))));
+                    for write in settings::parse(&name, &args, &keys)? {
                         token = token.wrapping_add(1);
                         match write {
                             settings::Write::Kvp(key, value) => {
-                                outbox.push_back(race::set_kvp(&key, &value, token))
+                                outbox.push_back(race::set_kvp(&key, &value, token));
+                                pending.insert(key, (value, now));
                             }
                             settings::Write::Loudness(db) => {
                                 outbox.push_back(race::dsp(0, race::DSP_INPUT_LEVEL, db));
