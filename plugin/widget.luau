@@ -28,10 +28,11 @@ local function apply(line: string)
     barWidget.setGlyphColor("on_surface")
   end
 
-  local tip = { "Stealth Pro II", if battery then `Battery {battery}%` else "Battery unknown" }
-  if s.charging then table.insert(tip, "Charging") end
-  table.insert(tip, if s.mic_muted then "Mic muted" else "Mic on")
-  barWidget.setTooltip(table.concat(tip, "\n"))
+  barWidget.setTooltip({
+    { key = "Stealth Pro II battery", value = if battery then `{battery}%` else "unknown" },
+    { key = "Charging", value = if s.charging then "yes" else "no" },
+    { key = "Mic", value = if s.mic_muted then "muted" else "on" },
+  })
   barWidget.setVisible(true)
 end
 
