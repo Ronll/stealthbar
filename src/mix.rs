@@ -11,73 +11,69 @@ use serde_json::Value;
 
 use crate::config::ChatMix;
 
-/// The wheel is a free-spinning encoder: the headset reports a 0-100 count of notches that is not where the
-/// wheel physically sits (it stops at 0 and 100 while the wheel keeps turning). So only the movement between two
-/// readings moves the mix, which is kept here, starting at the centre. Stray readings happen (Neap measured one
-/// notch reading 10 straight after 50): the first reading after the wheel was at rest that jumps more than a
-/// notch's worth is held until the next reading confirms it.
+/// The wheel's position as the headset reports it in pushes of key 0x510: an absolute 0-100 mix the headset keeps
+/// itself, clamped at 0 and 100. Measured on a 2283 dock: a slow notch moves it by 5, a normal one by 10, a fast
+/// spin by 20-30 per report; nothing arrives while the wheel is still. Because each report is absolute, a lost
+/// report doesn't matter: the next one is right again. A *read* of 0x510 (and the first value after reports are
+/// switched on) is a stale 0, so only pushes are used, and `mix` is None until the first push.
+#[derive(Default)]
 pub struct Wheel {
-    pub mix: u8,
-    last: Option<i64>,
+    pub mix: Option<u8>,
     seen_at: Option<Instant>,
-    doubted: Option<i64>,
+    /// NEAP WORKAROUND: a far first reading after rest, waiting for confirmation (value, when it arrived)
+    doubted: Option<(u8, Instant)>,
 }
 
+// NEAP WORKAROUND (stray first reading after rest), from Neap's ChatWheel
+// (github.com/lykosapps/Neap, src/Neap.Core/Mix/ChatWheel.cs). Neap measured that the first reading after the
+// wheel had been still can be far off: one notch read 10 straight after 50, and their mix fell from 55 to 11.
+// So a first reading after REST that is more than FIRST_NOTCH_LIMIT away is held: the next reading replaces it
+// (the wheel's value is absolute, so the next one is right either way), and if none comes within CONFIRM_AFTER
+// it is taken as real. Not seen on our 2283 dock (its big jumps were fast spins, which arrive mid-turn, not
+// after rest); kept because it costs at most a short delay. Drop it if it never triggers in practice.
 const REST: Duration = Duration::from_millis(500);
 const FIRST_NOTCH_LIMIT: i64 = 15;
-
-impl Default for Wheel {
-    fn default() -> Self {
-        Self {
-            mix: 50,
-            last: None,
-            seen_at: None,
-            doubted: None,
-        }
-    }
-}
+const CONFIRM_AFTER: Duration = Duration::from_millis(700);
 
 impl Wheel {
-    /// Forget the count (after a reconnect the next reading is only a starting point); the mix stays.
-    pub fn restart(&mut self) {
-        self.last = None;
-        self.doubted = None;
-    }
-
-    pub fn started(&self) -> bool {
-        self.last.is_some()
-    }
-
-    /// Take a reading of the count; true when the mix moved.
-    pub fn read(&mut self, count: i64, now: Instant) -> bool {
+    /// Take a pushed reading; true when the mix moved.
+    pub fn read(&mut self, value: i64, now: Instant) -> bool {
+        let value = value.clamp(0, 100) as u8;
         let rested = self.seen_at.is_none_or(|t| now.duration_since(t) >= REST);
         self.seen_at = Some(now);
-        let near = |a: i64, b: i64| (a - b).abs() <= FIRST_NOTCH_LIMIT;
-        let Some(mut last) = self.last else {
-            self.last = Some(count);
-            return false;
-        };
-        if let Some(doubted) = self.doubted.take() {
-            if near(count, doubted) {
-                last = doubted; // the count really moved while we weren't looking
-            } else if !near(count, last) {
-                self.last = Some(count); // neither fits: start over from here
-                return false;
-            } // else: the far reading was stray, continue from `last`
-        } else if rested && !near(count, last) {
-            self.doubted = Some(count);
+        // NEAP WORKAROUND, see REST / FIRST_NOTCH_LIMIT above
+        if self.doubted.take().is_none()
+            && rested
+            && let Some(mix) = self.mix
+            && (i64::from(value) - i64::from(mix)).abs() > FIRST_NOTCH_LIMIT
+        {
+            self.doubted = Some((value, now));
             return false;
         }
-        self.last = Some(count);
-        let old = i64::from(self.mix);
-        let mut mix = (old + count - last).clamp(0, 100);
-        // centre detent (as Neap): a move onto or across 50 stops there, so "both at full" is easy to hit
-        if (old < 50 && mix > 50) || (old > 50 && mix < 50) {
+        self.set(value)
+    }
+
+    /// Call regularly: takes a held reading as real once nothing contradicted it. True when the mix moved.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        match self.doubted {
+            Some((value, at)) if now.duration_since(at) >= CONFIRM_AFTER => {
+                self.doubted = None;
+                self.set(value)
+            }
+            _ => false,
+        }
+    }
+
+    fn set(&mut self, value: u8) -> bool {
+        let mut mix = value;
+        // centre detent (as Neap): a move across 50 stops at 50 for one report, so "both at full" is easy to hit
+        if let Some(old) = self.mix
+            && ((old < 50 && mix > 50) || (old > 50 && mix < 50))
+        {
             mix = 50;
         }
-        let mix = mix as u8;
-        let moved = mix != self.mix;
-        self.mix = mix;
+        let moved = self.mix != Some(mix);
+        self.mix = Some(mix);
         moved
     }
 }
@@ -164,29 +160,23 @@ mod tests {
     }
 
     #[test]
-    fn wheel_moves_by_steps_and_skips_strays() {
+    fn wheel_follows_pushes_with_detent_and_neap_guard() {
         let t = Instant::now();
         let ms = |n| t + Duration::from_millis(n);
         let mut w = Wheel::default();
-        assert!(!w.read(80, ms(0))); // starting point only
-        assert!(w.read(74, ms(100)) && w.mix == 44);
-        // crossing the centre stops at 50, the next notch moves on
-        let mut c = Wheel::default();
-        c.read(0, ms(0));
-        assert!(c.read(5, ms(100)) && c.mix == 55);
-        assert!(c.read(-5, ms(200)) && c.mix == 50);
-        assert!(c.read(-10, ms(300)) && c.mix == 45);
-        assert!(w.read(68, ms(200)) && w.mix == 38);
-        // after a rest, a far jump is held, then dropped when the next reading is near the old count
-        assert!(!w.read(10, ms(2000)));
-        assert!(w.read(65, ms(2100)) && w.mix == 35);
-        // after a rest, a far jump confirmed by the next reading becomes the new starting point
-        assert!(!w.read(20, ms(4000)));
-        assert!(w.read(17, ms(4100)) && w.mix == 32);
-        // clamps
-        assert!(w.read(0, ms(4200)) && w.mix == 15);
-        w.restart();
-        assert!(!w.read(90, ms(9000)) && w.mix == 15);
+        assert!(w.mix.is_none());
+        assert!(w.read(100, ms(0)) && w.mix == Some(100)); // first push is absolute
+        assert!(w.read(90, ms(100)) && w.mix == Some(90));
+        assert!(w.read(70, ms(200)) && w.mix == Some(70)); // fast spin mid-turn: taken
+        assert!(w.read(40, ms(300)) && w.mix == Some(50)); // crossing 50 stops there
+        assert!(w.read(35, ms(400)) && w.mix == Some(35));
+        // after a rest, a far reading is held; the next reading replaces it
+        assert!(!w.read(90, ms(3000)) && w.mix == Some(35));
+        assert!(w.read(40, ms(3100)) && w.mix == Some(40));
+        // a held reading nothing contradicts is taken after CONFIRM_AFTER
+        assert!(!w.read(10, ms(6000)));
+        assert!(!w.tick(ms(6300)));
+        assert!(w.tick(ms(6800)) && w.mix == Some(10));
     }
 
     #[test]

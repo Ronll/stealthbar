@@ -35,6 +35,10 @@ const REPLY_WAIT: Duration = Duration::from_millis(600);
 const BUSY_FOR: Duration = Duration::from_secs(2);
 /// No answer to an ask within this time means the headset is off (or the dock is stuck).
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
+/// Unanswered GSI asks in a row before the headset counts as off (the dock drops a reply now and then).
+const OFF_AFTER_MISSES: u32 = 3;
+/// The headset answered but not every record came in, or a single ask went unanswered: ask again soon.
+const RETRY_PARTIAL: Duration = Duration::from_secs(1);
 /// While on, re-ask now and then so a headset that went away silently is noticed.
 const HEARTBEAT: Duration = Duration::from_secs(60);
 /// While off, ask again this often to notice it coming on even without a link indication.
@@ -44,16 +48,16 @@ const RESUBSCRIBE_AFTER_LINK: Duration = Duration::from_millis(1500);
 const RESCAN: Duration = Duration::from_secs(2);
 /// Look for new chat streams this often, to give them the current mix.
 const MIX_REFRESH: Duration = Duration::from_secs(2);
-/// Idle poll while the chat mix is on and the headset is on, so the wheel feels immediate and a burst of
-/// wheel reports never overflows the dock's queue.
-const IDLE_POLL_MIX: Duration = Duration::from_millis(100);
+/// After a wheel report, keep polling fast this long: the rest of the turn then shows at once, and only its
+/// first notch waits for the idle poll.
+const ACTIVE_FOR: Duration = Duration::from_secs(1);
 
 /// Records the headset answers (each owns a key range: Inf 1xx, GSI 2xx, 3DT 5xx, Mic 6xx, SAF 7xx, Enc axx,
 /// Btn bxx, AQG 12xx, AQM 13xx). GSI answering is what "on" means.
 const RECORDS: [&str; 9] = [
     "GSI", "Inf", "Mic", "SAF", "3DT", "Enc", "Btn", "AQG", "AQM",
 ];
-/// Transmitter slots: an empty slot never answers, so these are asked but not waited for.
+/// Transmitter slots: an empty slot never answers, so these are asked once per connection but not waited for.
 const SLOTS: [&str; 4] = ["TX1", "TX2", "TX3", "TX4"];
 
 #[derive(Default)]
@@ -191,6 +195,20 @@ fn find_device() -> Option<(PathBuf, String)> {
     })
 }
 
+/// `STEALTHBAR_TRACE=1`: every report written and every non-empty report read, as hex on stderr.
+fn trace(dir: &str, report: &[u8]) {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("STEALTHBAR_TRACE").is_some_and(|v| v == "1")) {
+        let len = report
+            .get(1)
+            .map_or(0, |&n| usize::from(n) + 3)
+            .min(report.len());
+        let hex: Vec<String> = report[..len].iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!("{dir:>3} {}", hex.join(" "));
+    }
+}
+
 struct Hid {
     file: File,
 }
@@ -207,6 +225,7 @@ impl Hid {
 
     /// Without an interrupt OUT endpoint the kernel sends this as a SET_REPORT control transfer.
     fn write(&mut self, report: &[u8]) -> io::Result<()> {
+        trace("out", report);
         self.file.write_all(report)
     }
 
@@ -227,7 +246,11 @@ impl Hid {
                 _ => Err(e),
             };
         }
-        Ok(buf[..(n as usize).min(REPORT_LEN)].to_vec())
+        let data = buf[..(n as usize).min(REPORT_LEN)].to_vec();
+        if data.get(1).is_some_and(|&len| len > 0) {
+            trace("in", &data);
+        }
+        Ok(data)
     }
 
     /// Discard what the interrupt endpoint queued (media keys), so the kernel's buffer never fills.
@@ -246,6 +269,19 @@ fn run(
 ) -> io::Result<()> {
     let mut hid = Hid::open(path)?;
     let mut reasm = Reassembler::default();
+    // Empty the dock's queue first: bytes a previous reader left unread fill it, and replies to our first
+    // requests got lost behind them. Done when three polls in a row come back empty (or after 1 s).
+    let drain_until = Instant::now() + Duration::from_secs(1);
+    let mut empty = 0;
+    while empty < 3 && Instant::now() < drain_until {
+        let report = hid.get_input()?;
+        empty = if report.get(1).is_some_and(|&n| n > 0) {
+            0
+        } else {
+            empty + 1
+        };
+        sleep(BUSY_POLL);
+    }
     let mut state = State {
         present: true,
         device: Some(product.into()),
@@ -253,18 +289,23 @@ fn run(
     };
     out.emit(&state);
 
-    let mut token: u8 = 0;
+    // random start: a request whose counter repeats a recent one (every run starting at 1) can go unanswered
+    let mut token: u8 = race::random_byte();
     let mut outbox: VecDeque<[u8; REPORT_LEN]> = VecDeque::new();
     let mut awaiting: Option<Instant> = None;
     let mut asked_at: Option<Instant> = None;
     let mut answered: HashSet<String> = HashSet::new();
     let mut next_ask = Some(Instant::now());
+    // records answered since the headset (re)connected; the current ask; whether the slots were asked
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut asked: Vec<&str> = Vec::new();
+    let mut slots_asked = false;
+    let mut misses = 0;
     let mut busy_until = Instant::now();
     // per connection: the chat-mix writes (enable wheel reports, wheel job) are sent once all records are in
     let mut mix_setup_done = false;
     let mut wheel = mix::Wheel::default();
     let mut mix_moved = false;
-    let mut wheel_moved_once = false;
     let mut mix_applied_at = Instant::now();
     let mut mix_seen = HashSet::new();
     let chat = &cfg.chat_mix;
@@ -272,7 +313,24 @@ fn run(
     loop {
         let now = Instant::now();
         if next_ask.is_some_and(|t| now >= t) {
-            for record in RECORDS.iter().chain(&SLOTS) {
+            // While off, and as the heartbeat once everything is in, only GSI: each unanswered request costs
+            // REPLY_WAIT of fast polling, and once subscribed the headset pushes every change. While on but
+            // incomplete, only the records still missing (a lost reply then costs one request, not a round).
+            let have_all = RECORDS.iter().all(|r| seen.contains(*r));
+            asked = if !state.on || have_all {
+                vec!["GSI"]
+            } else {
+                RECORDS
+                    .iter()
+                    .copied()
+                    .filter(|r| !seen.contains(*r))
+                    .collect()
+            };
+            if state.on && !slots_asked {
+                asked.extend(SLOTS);
+                slots_asked = true;
+            }
+            for record in &asked {
                 token = token.wrapping_add(1);
                 outbox.push_back(race::subscribe(record, token));
             }
@@ -296,11 +354,12 @@ fn run(
                 CMD_LINK if packet.payload.len() > 2 => {
                     if packet.payload[2] == 1 {
                         next_ask = Some(Instant::now() + RESUBSCRIBE_AFTER_LINK);
+                        seen.clear();
+                        slots_asked = false;
                     } else {
                         state.on = false;
                     }
                     state.keys.remove("510");
-                    wheel.restart();
                     mix_setup_done = false;
                 }
                 CMD_KVP => {
@@ -310,6 +369,8 @@ fn run(
                     for doc in race::documents(&packet.payload) {
                         if let Some(record) = doc.get("OR").and_then(Value::as_str) {
                             answered.insert(record.to_owned());
+                            misses = 0;
+                            seen.insert(record.to_owned());
                         }
                         if let Some(kvp) = doc["KVP"].as_object() {
                             state.on = true;
@@ -325,9 +386,10 @@ fn run(
                             {
                                 mix_moved = true;
                             }
-                            if wheel.started() {
-                                state.mix = Some(wheel.mix);
+                            if pushed && kvp.contains_key("510") {
+                                busy_until = busy_until.max(Instant::now() + ACTIVE_FOR);
                             }
+
                             state.keys.extend(
                                 kvp.iter()
                                     .filter(|(k, _)| pushed || *k != "510")
@@ -340,24 +402,44 @@ fn run(
             }
         }
 
-        let all_in = RECORDS.iter().all(|r| answered.contains(*r));
+        let have_all = RECORDS.iter().all(|r| seen.contains(*r));
         if let Some(at) = asked_at {
-            if all_in {
+            let done = asked
+                .iter()
+                .filter(|r| !r.starts_with("TX"))
+                .all(|r| answered.contains(*r));
+            if done {
                 asked_at = None;
-                next_ask.get_or_insert(Instant::now() + HEARTBEAT);
-            } else if now.duration_since(at) > ANSWER_TIMEOUT {
+                // it just came on, or records are still missing: ask for the rest now
+                next_ask = Some(if have_all {
+                    Instant::now() + HEARTBEAT
+                } else {
+                    Instant::now()
+                });
+            } else if now.duration_since(at) > ANSWER_TIMEOUT + REPLY_WAIT * asked.len() as u32 {
                 asked_at = None;
-                // nothing at all: the headset is off; a partial answer: it is on, ask again soon
-                state.on = answered.contains("GSI");
-                next_ask.get_or_insert(Instant::now() + RETRY_OFF);
+                // Nothing at all OFF_AFTER_MISSES times in a row: the headset is off (the dock now and then drops a reply, so one
+                // miss only means asking again soon). A partial answer: it is on, ask for the rest soon.
+                misses = if answered.is_empty() { misses + 1 } else { 0 };
+                if misses >= OFF_AFTER_MISSES {
+                    state.on = false;
+                }
+                let retry = if misses >= OFF_AFTER_MISSES {
+                    RETRY_OFF
+                } else {
+                    RETRY_PARTIAL
+                };
+                next_ask.get_or_insert(Instant::now() + retry);
             }
         }
         if !state.on {
             mix_setup_done = false;
+            seen.clear();
+            slots_asked = false;
         }
 
         if chat.enabled && state.on {
-            if !mix_setup_done && all_in {
+            if !mix_setup_done && have_all {
                 // the headset reports the wheel (0x510) only while 0x500 is set, and clears 0x500 at every connect
                 token = token.wrapping_add(1);
                 outbox.push_back(race::set_kvp("500", "1", token));
@@ -369,12 +451,13 @@ fn run(
                 mix_setup_done = true;
             }
             // nothing is touched until the wheel has moved since the daemon started
-            if state.mix.is_some()
+            mix_moved |= wheel.tick(now);
+            state.mix = wheel.mix;
+            // nothing is touched until the wheel has reported since the daemon started
+            if let Some(m) = wheel.mix
                 && (mix_moved || now.duration_since(mix_applied_at) > MIX_REFRESH)
-                && (wheel_moved_once || mix_moved)
             {
-                mix::apply(chat, wheel.mix, &mut mix_seen, mix_moved);
-                wheel_moved_once = true;
+                mix::apply(chat, m, &mut mix_seen, mix_moved);
                 mix_moved = false;
                 mix_applied_at = Instant::now();
             }
@@ -383,6 +466,7 @@ fn run(
         out.emit(&state);
         if once
             && asked_at.is_none()
+            && (have_all || misses >= OFF_AFTER_MISSES)
             && outbox.is_empty()
             && awaiting.is_none_or(|t| now.duration_since(t) > REPLY_WAIT)
         {
@@ -396,8 +480,6 @@ fn run(
             || report.get(1).is_some_and(|&n| n > 0);
         sleep(if busy {
             BUSY_POLL
-        } else if state.on && chat.enabled {
-            IDLE_POLL_MIX
         } else if state.on {
             IDLE_POLL_ON
         } else {

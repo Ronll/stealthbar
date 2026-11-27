@@ -1,6 +1,6 @@
 id = "ronll/stealthbar"
 name = "Stealth Pro II"
-version = "0.2.4"
+version = "0.2.5"
 plugin_api = 43
 author = "Ronll"
 license = "MIT"

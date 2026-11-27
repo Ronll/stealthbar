@@ -32,9 +32,25 @@ pub fn set_kvp(key: &str, value: &str, token: u8) -> [u8; REPORT_LEN] {
     request(0x03, &body, token)
 }
 
+/// Session byte of this process's requests, different per run: a request whose token bytes repeat a recent
+/// one (as every run starting at the same values would) can go unanswered.
+fn session() -> u8 {
+    use std::sync::OnceLock;
+    static SESSION: OnceLock<u8> = OnceLock::new();
+    *SESSION.get_or_init(|| random_byte() | 0x10)
+}
+
+/// Good enough randomness for request tokens: clock nanoseconds mixed with the process id.
+pub fn random_byte() -> u8 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let x = nanos ^ std::process::id().rotate_left(13);
+    (x ^ (x >> 8) ^ (x >> 16)) as u8
+}
 /// RACE 0x9902 request: `48 <op> <session> <counter> <seq> 00*7 <body>`; the device echoes the token bytes.
 fn request(op: u8, payload: &[u8], token: u8) -> [u8; REPORT_LEN] {
-    let mut body = vec![0x48, op, 0x5b, token, 0x01, 0, 0, 0, 0, 0, 0, 0];
+    let mut body = vec![0x48, op, session(), token, 0x01, 0, 0, 0, 0, 0, 0, 0];
     body.extend_from_slice(payload);
     let len = (body.len() + 2) as u16;
     let mut race = vec![0x05, 0x5a];
@@ -61,7 +77,14 @@ impl Reassembler {
             return Vec::new();
         }
         let n = (report[1] as usize).min(report.len() - 3);
-        self.buf.extend_from_slice(&report[3..3 + n]);
+        let data = &report[3..3 + n];
+        // The dock sometimes loses a report. Packets start at a report boundary, so a report that begins with a
+        // packet header while an earlier packet is still incomplete means that packet lost a piece: drop it
+        // instead of letting it swallow this one (JSON text never contains the 0x05 header byte).
+        if data.len() >= 2 && data[0] == 0x05 && (0x5a..=0x5d).contains(&data[1]) {
+            self.buf.clear();
+        }
+        self.buf.extend_from_slice(data);
         let mut packets = Vec::new();
         loop {
             // resync on the start of a packet: 05 followed by a type 5a..5d
@@ -139,6 +162,24 @@ mod tests {
         }
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].cmd, CMD_KVP);
+        assert_eq!(documents(&got[0].payload)[0]["KVP"]["240"], "55");
+
+        // a lost middle report: the broken packet is dropped and the next one still comes through
+        let chunks: Vec<&[u8]> = race.chunks(20).collect();
+        let mut r = Reassembler::default();
+        let mut got = Vec::new();
+        for chunk in chunks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, c)| c)
+            .chain(race.chunks(59).collect::<Vec<_>>().iter())
+        {
+            let mut report = vec![REPORT_IN, chunk.len() as u8, 0];
+            report.extend_from_slice(chunk);
+            got.extend(r.feed(&report));
+        }
+        assert_eq!(got.len(), 1);
         assert_eq!(documents(&got[0].payload)[0]["KVP"]["240"], "55");
     }
 }
